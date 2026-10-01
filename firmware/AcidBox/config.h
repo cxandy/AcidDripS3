@@ -49,6 +49,14 @@ const uint8_t POT_PINS[POT_NUM] = {15, 16, 17};
 const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 #endif
 
+/* M0 diagnostics */
+#define M0_REVERB_TOGGLE_PIN 23 // Momentarily short this pin to GND to bypass the reverb.
+                                // Safe to use: AcidBanger.ino read_button() forces the
+                                // history to 0 for every button except numb==5 (GPIO0),
+                                // so the jukebox provably ignores pin 23 and start/stop
+                                // on the BOOT button keeps working. init_button() already
+                                // leaves it as INPUT_PULLUP.
+#define M0_DIAG 1               // the M0 diagnostic block below. Set to 0 to strip it.
 
 float bpm = 130.0f;
 

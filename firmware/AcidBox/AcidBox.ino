@@ -90,6 +90,13 @@ static  uint32_t  last_reset = 0;
 static  float     param[POT_NUM];
 static int    ctrl_hold_notes;
 
+#if M0_DIAG
+// M0: reverb bypass, toggled from regular_checks() on M0_REVERB_TOGGLE_PIN. Written on
+// core 1, read on core 0 from the IRAM audio task, hence volatile. A bool is a single
+// word load, so there is no tearing to worry about.
+static volatile bool m0ReverbBypass = false;
+#endif
+
 // Audio buffers of all kinds
 volatile int current_gen_buf = 0; // set of buffers for generation
 volatile int current_out_buf = 1 - 0; // set of buffers for output
@@ -434,6 +441,18 @@ void regular_checks() {
   }
 #endif
 
+#if M0_DIAG
+  // Momentary short of M0_REVERB_TOGGLE_PIN flips the reverb bypass, so the symptom
+  // can be A/B'd on the bench instead of costing a rebuild per comparison.
+  static uint8_t pinLast = HIGH;
+  uint8_t pinNow = digitalRead( M0_REVERB_TOGGLE_PIN );
+  if ( ( pinNow == LOW ) && ( pinLast == HIGH ) ) {
+    m0ReverbBypass = !m0ReverbBypass;
+    DEBF("[M0] reverb bypass %s\r\n", m0ReverbBypass ? "ON" : "OFF");
+  }
+  pinLast = pinNow;
+#endif
+
 }
 
 
@@ -484,9 +503,21 @@ void IRAM_ATTR mixer() { // sum buffers
       dly_r = dly_k1 * synth1_out_r + dly_k2 * synth2_out_r + dly_k3 * drums_out_r;
       Delay.Process( &dly_l, &dly_r );
 #ifndef NO_PSRAM
+  #if M0_DIAG
+      // M0: bypass, so the bench symptom can be attributed to the reverb or ruled out
+      // without a rebuild. Reverb.Process() adds its own output back into the input
+      // unconditionally (fx_reverb.h), so the tail never dies once anything excites it.
+      if ( m0ReverbBypass ) {
+        rvb_l = 0.0f;
+        rvb_r = 0.0f;
+      } else {
+  #endif
       rvb_l = rvb_k1 * synth1_out_l + rvb_k2 * synth2_out_l + rvb_k3 * drums_out_l; // reverb bus
       rvb_r = rvb_k1 * synth1_out_r + rvb_k2 * synth2_out_r + rvb_k3 * drums_out_r;
       Reverb.Process( &rvb_l, &rvb_r );
+  #if M0_DIAG
+      }
+  #endif
 
       mix_buf_l[current_out_buf][i] = (synth1_out_l + synth2_out_l + drums_out_l + dly_l + rvb_l);
       mix_buf_r[current_out_buf][i] = (synth1_out_r + synth2_out_r + drums_out_r + dly_r + rvb_r);
