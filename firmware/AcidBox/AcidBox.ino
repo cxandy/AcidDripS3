@@ -237,7 +237,19 @@ static void IRAM_ATTR audio_task1(void *userData) {
 static void IRAM_ATTR audio_task2(void *userData) {
   vTaskDelay(50);
   while (true) {
-    taskYIELD();
+    // M0: this used to be taskYIELD(), which was the whole bug. taskYIELD() only
+    // hands the CPU to a task of equal or higher priority, so it cannot yield to
+    // anything. This task is pinned to core 1 at priority 5 while Arduino's loopTask
+    // -- the task that runs loop() and therefore regular_checks() -- is on the same
+    // core at priority 1. Spinning here at "priority 5 yielding to nothing" starved
+    // loopTask permanently the moment this task started.
+    //
+    // That is not only why the diagnostics went quiet: it means everything the jukebox
+    // needs from loop() stopped running after setup, which is a live candidate for the
+    // original symptom (one hit at power-on, then noise) on its own.
+    //
+    // The matching vTaskDelay(1) is at the bottom of the loop, so every iteration
+    // sleeps once: there is no path through here that can spin.
  /*   
     if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY)) { // wait for the notification from the SynthTask1
 
@@ -267,6 +279,8 @@ static void IRAM_ATTR audio_task2(void *userData) {
     
 //    taskYIELD();
     arT = micros() - art;
+    // Replaces the taskYIELD() at the top of the loop; see the note there.
+    vTaskDelay(1);
   }
 }
 
@@ -348,6 +362,12 @@ delay(200);
   // M0: priority was 1, equal to Arduino's loopTask (which runs regular_checks()
   // here). That is safe only while loop() stays trivial. Later milestones add
   // TFT redraws and a sequencer, so the audio tasks get headroom now.
+  //
+  // Raising this to 5 is only safe because audio_task2 no longer spins hot. It is
+  // pinned to the same core as loopTask, so at equal-or-higher priority a busy task2
+  // takes the core away from loop() for good -- taskYIELD() will not save it, since
+  // taskYIELD only yields to tasks of equal or higher priority. The two priorities
+  // here must be read together with audio_task2's vTaskDelay(1), not on their own.
   xTaskCreatePinnedToCore( audio_task1, "SynthTask1", 5000, NULL, 5, &SynthTask1, 0 );
   xTaskCreatePinnedToCore( audio_task2, "SynthTask2", 5000, NULL, 5, &SynthTask2, 1 );
 
