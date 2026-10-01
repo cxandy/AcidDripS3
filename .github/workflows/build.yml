@@ -79,7 +79,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Cache arduino-cli and the ESP32 core
         # The ESP32 toolchain is ~1.5 GB, so this cache is what keeps a run
@@ -90,7 +90,7 @@ jobs:
         # 1.5 GB download on every source change -- exactly the iteration this
         # workflow exists to make cheap. Bumping a version in env: does change
         # the key, which is the case that genuinely needs a fresh install.
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # ~/.arduino15 holds packages/, staging/ and the library index -- the
           # whole ~1.5 GB toolchain. The arduino-cli binary itself is only a few
@@ -256,7 +256,7 @@ jobs:
 
       - name: Upload firmware binary
         if: success()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: AcidDripS3-firmware
           path: ${{ runner.temp }}/build/*.bin
@@ -264,7 +264,7 @@ jobs:
 
       - name: Upload LittleFS image
         if: success()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: AcidDripS3-littlefs
           path: ${{ runner.temp }}/littlefs/littlefs.bin
@@ -272,8 +272,45 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: build-log
           path: build.log
           if-no-files-found: ignore
+      - name: Publish the numbers on the run page
+        if: always()
+        run: |
+          # Two budgets have to be watched for the whole project, and both are
+          # invisible until you go looking: the 1 MB app partition (currently
+          # ~806 KB for the upstream AcidBox baseline) and the 3 MB LittleFS
+          # partition (currently nearly full of drum kits). Putting them on
+          # the run page means a M1-M4 change that overspends shows up as a
+          # number on the run that caused it, not three milestones later on
+          # the bench.
+          build="${{ runner.temp }}/build"
+          fs="${{ runner.temp }}/littlefs/littlefs.bin"
+          app_max=1048576
+
+          {
+            echo "### Flash budgets"
+            echo
+            echo "| region | limit | used | free |"
+            echo "|---|---|---|---|"
+            if [ -f "$build/firmware.bin" ]; then
+              used=$(stat -c%s "$build/firmware.bin")
+              echo "| app0 (noota_3g) | $app_max | $used | $((app_max - used)) |"
+            else
+              echo "| app0 (noota_3g) | $app_max | build failed | - |"
+            fi
+            if [ -f "$fs" ]; then
+              used=$(stat -c%s "$fs")
+              echo "| $FS_PARTITION_LABEL (LittleFS) | $FS_PARTITION_SIZE | $used | $((FS_PARTITION_SIZE - used)) |"
+            else
+              echo "| $FS_PARTITION_LABEL (LittleFS) | $FS_PARTITION_SIZE | no image | - |"
+            fi
+            echo
+            echo "Sketch size as reported by arduino-cli:"
+            echo '```'
+            grep -E 'Sketch uses|Global variables' build.log || echo "(not in log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
