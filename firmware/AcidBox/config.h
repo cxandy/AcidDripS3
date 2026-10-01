@@ -192,6 +192,27 @@ const float  NORM_RADIANS = ONE_DIV_TWOPI * TABLE_SIZE;
   #undef DEBUG_ON
 #endif
 
+// M0: the debug log goes to the USB-OTG connector, not UART0.
+//
+// Evidence, from the S3 sdkconfig this core is built with:
+//   CONFIG_ESP_CONSOLE_UART_DEFAULT 1
+//   CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG 1
+// The console mirrors onto USB-Serial-JTAG, which is why the
+// heap_caps_print_heap_info dumps out of Sampler::Init were visible on the
+// USB-OTG cable while DEBUG_PORT on UART0 produced nothing at all. UART0 is not
+// wired to the connector this board exposes. Reading the visible heap dumps as
+// evidence that UART0 worked was the wrong inference, and cost two builds.
+//
+// HWCDCSerial is named directly rather than going through Serial, because the core
+// defines Serial from USBMode (HardwareSerial.h:444) and that is how the log
+// ended up pointed at a port that was never started. The guard matches the one
+// HWCDC.h uses on its own class definition, so this falls back to Serial0 if the
+// CDC is not enabled rather than failing to compile.
+#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+  #undef DEBUG_PORT
+  #define DEBUG_PORT HWCDCSerial
+#endif
+
 // debug macros
 #ifdef DEBUG_ON
   #define DEB(...)    DEBUG_PORT.print(__VA_ARGS__) 

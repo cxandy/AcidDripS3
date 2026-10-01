@@ -73,17 +73,20 @@ env:
   #                      wrong fails silently -- it compiles, it just cannot
   #                      hold the 2.5 MB of drum kits.
   #   FlashSize=16M      Flash size of the target board. Raise if yours differs.
-  #   USBMode=hwcdc      M0, temporary, and diagnostic only. It does NOT move the log:
-  #                      DEBUG_PORT is named Serial0 in config.h and stays on UART0.
-  #                      Its job is to bring the CDC up so setup() can write a marker
-  #                      to it, alongside one on UART0, and so a single flash shows
-  #                      which of the two this board's connector is wired to.
-  #   CDCOnBoot=cdc      Same reason, and required for it: the core default is
-  #                      Disabled, in which case HWCDC.h never defines the class and
-  #                      the port does not exist at all. The previous hwcdc-only
-  #                      build had this half right but left CDCOnBoot alone, which is
-  #                      why it went silent and looked like the log was broken.
-  # Both come back out once the port is known; see the probe in setup().
+  #   USBMode=hwcdc      Puts the debug log on the USB-OTG connector. Not optional on
+  #                      this board: its S3 sdkconfig sets
+  #                      CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG, so the IDF
+  #                      console is visible there while UART0 is not wired to anything
+  #                      the user can see. config.h points DEBUG_PORT at HWCDCSerial
+  #                      to match.
+  #   CDCOnBoot=cdc      Required by the above, not decorative. The core default is
+  #                      Disabled, and HWCDC.h guards its own class on
+  #                      ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT, so without this
+  #                      the port is selected but never started -- which is what made
+  #                      the first hwcdc attempt look like a dead log.
+  # Both keys together mean USB MIDI cannot return on this connector: TinyUSB and
+  # USB-Serial-JTAG share the S3 PHY and GPIO19/20. That is why MIDI_USB_DEVICE is
+  # off in config.h. Restoring USB MIDI needs a real UART on GPIO43/44 instead.
   # The merged-image step parses PartitionScheme= out of this FQBN to find the
   # core's partition CSV, then derives every flash offset from that CSV. So the
   # FQBN stays the single source of truth: change the scheme here and the merge
