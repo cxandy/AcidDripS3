@@ -21,7 +21,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ARDUINO_CLI_VERSION: 1.5.2
+  # 1.5.1 is the newest *stable* release. There is no 1.5.2 on
+  # downloads.arduino.cc -- `latest` currently serves 1.5.2-rc.1, and asking
+  # for a version that has no release tarball just 404s.
+  ARDUINO_CLI_VERSION: 1.5.1
   ESP32_CORE_VERSION: 3.3.12
   MIDI_LIB_VERSION: 4.2.0
 
@@ -45,19 +48,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache arduino-cli and the ESP32 core
-        uses: actions/cache@v4
+        # The ESP32 toolchain is ~1.5 GB, so this cache is what keeps a run
+        # down to a few minutes instead of ten.
+        #
+        # The key deliberately excludes firmware content. A sketch edit does not
+        # invalidate the toolchain, and hashing firmware/** would throw away a
+        # 1.5 GB download on every source change -- exactly the iteration this
+        # workflow exists to make cheap. Bumping a version in env: does change
+        # the key, which is the case that genuinely needs a fresh install.
+        uses: actions/cache@v5
         with:
           path: |
             ~/.arduino15
             ~/Arduino
             /usr/local/lib/arduino-cli
-          key: >-
-            arduino-${{ env.ESP32_CORE_VERSION }}-${{ env.MIDI_LIB_VERSION }}-${{ hashFiles('firmware/**') }}
+          key: arduino-${{ env.ESP32_CORE_VERSION }}-${{ env.MIDI_LIB_VERSION }}
           restore-keys: |
-            arduino-${{ env.ESP32_CORE_VERSION }}-${{ env.MIDI_LIB_VERSION }}-
+            arduino-${{ env.ESP32_CORE_VERSION }}-
 
       - name: Install arduino-cli
         run: |
@@ -84,11 +94,13 @@ jobs:
         # USBMIDI_CREATE_INSTANCE fails to compile with a confusing error.
         # Report it explicitly so a failure here is never a mystery.
         run: |
-          sdk=$(find ~/.arduino15/packages/esp32 -name sdkconfig.h -path '*s3*' | head -1)
-          echo "sdkconfig: $sdk"
-          if [ -n "$sdk" ]; then
-            grep -E 'TINYUSB_(MIDI|CDC)_ENABLED' "$sdk" || echo "no TINYUSB_* lines found"
-          fi
+          for sdk in $(find ~/.arduino15/packages/esp32 -name sdkconfig.h | sort); do
+            if grep -q 'CONFIG_IDF_TARGET_ESP32S3' "$sdk"; then
+              echo "=== $sdk ==="
+              grep -E 'TINYUSB' "$sdk" || echo "  (no TINYUSB config at all)"
+              break
+            fi
+          done
 
       - name: Compile
         run: |
@@ -113,7 +125,7 @@ jobs:
 
       - name: Upload firmware binary
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: AcidDripS3-firmware
           path: ${{ runner.temp }}/build/*.bin
@@ -121,7 +133,7 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-log
           path: build.log
