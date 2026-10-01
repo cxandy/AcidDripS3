@@ -73,12 +73,11 @@ env:
   #                      wrong fails silently -- it compiles, it just cannot
   #                      hold the 2.5 MB of drum kits.
   #   FlashSize=16M      Flash size of the target board. Raise if yours differs.
-  # Partition scheme, named once. The merged-image step parses this CSV to
-  # derive every flash offset, so hardcoding noota_3g a second time inside
-  # the FQBN would give the two a chance to disagree.
-  PARTITION_SCHEME: noota_3g
-
-  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=${{ env.PARTITION_SCHEME }},FlashSize=16M
+  # The merged-image step parses PartitionScheme= out of this FQBN to find the
+  # core's partition CSV, then derives every flash offset from that CSV. So the
+  # FQBN stays the single source of truth: change the scheme here and the merge
+  # follows, with nothing to keep in sync by hand.
+  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
 
 jobs:
   build:
@@ -300,15 +299,24 @@ jobs:
           # than written here. The 0xe000 vs 0xe0000 trap is exactly the
           # kind of thing that goes stale silently when it lives in a
           # comment; if the partition scheme ever changes, this follows.
+          # The scheme name comes from the FQBN, which is what arduino-cli
+          # actually built with -- so there is one source of truth.
           set -euo pipefail
           command -v python3 >/dev/null || { echo "::error::python3 missing on runner"; exit 1; }
 
-          csv=$(find ~/.arduino15/packages/esp32/hardware/esp32 \
-                  -path "*/tools/partitions/${PARTITION_SCHEME}.csv" -print -quit)
-          if [ -z "$csv" ]; then
-            echo "::error::${PARTITION_SCHEME}.csv not found in the installed core"
+          scheme=$(sed -n 's/.*PartitionScheme=\([^,]*\).*/\1/p' <<<"$FQBN")
+          if [ -z "$scheme" ]; then
+            echo "::error::no PartitionScheme= in FQBN: $FQBN"
             exit 1
           fi
+
+          csv=$(find ~/.arduino15/packages/esp32/hardware/esp32 \
+                  -path "*/tools/partitions/${scheme}.csv" -print -quit)
+          if [ -z "$csv" ]; then
+            echo "::error::${scheme}.csv not found in the installed core (from FQBN: $FQBN)"
+            exit 1
+          fi
+          echo "partition scheme: $scheme"
           echo "partition CSV: $csv"
 
           mkdir -p "${{ runner.temp }}/merged"
