@@ -127,6 +127,23 @@ volatile uint32_t m0Bad     = 0;   // NaN or Inf samples seen on the final mix
                           if (!(m0a_ < 1e9f)) m0Bad++; }
 #endif
 
+#if BENCH_AUDIO_HEADROOM
+// See config.h for what these mean and why the worst buffer is the number that counts.
+// bahFillUs and bahBlockUs are the hand-off: i2s_output() measures its own two phases
+// and leaves them here, because that is the only place the float->int16 loop and the
+// blocking write can be timed apart from each other. audio_task1 picks them up on the
+// far side of the call.
+volatile uint32_t bahMaxGenMixUs = 0;
+volatile uint32_t bahMaxFillUs   = 0;
+volatile uint32_t bahMaxBlockUs  = 0;
+volatile uint32_t bahMaxCpuUs    = 0;
+volatile uint32_t bahSumCpuUs    = 0;
+volatile uint32_t bahCount       = 0;
+volatile uint32_t bahOverruns    = 0;
+volatile uint32_t bahFillUs      = 0;
+volatile uint32_t bahBlockUs     = 0;
+#endif
+
 // Audio buffers of all kinds
 volatile int current_gen_buf = 0; // set of buffers for generation
 volatile int current_out_buf = 1 - 0; // set of buffers for output
@@ -228,6 +245,30 @@ static void IRAM_ATTR audio_task1(void *userData) {
       fxT = micros() - fxt;
       
       i2s_output();
+
+#if BENCH_AUDIO_HEADROOM
+      // M1's precondition. s1T/s2T/drT/fxT already exist above, so this adds no
+      // micros() calls of its own -- it reuses spans the author was already taking.
+      // That matters for two reasons: the measurement barely perturbs what it
+      // measures, and the four spans are each measured with a trailing micros() call
+      // inside them, so this total is a slight OVER-estimate of pure work. Headroom
+      // wants the pessimistic number.
+      //
+      // Deliberately NOT included: the time spent blocked inside I2S.write(). That is
+      // the DMA pacing the loop, not the CPU working; counting it would report the
+      // period back to us as if it were our own cost and always show 100%.
+      {
+        uint32_t bahG_ = s1T + s2T + drT + fxT;
+        uint32_t bahC_ = bahG_ + bahFillUs;
+        if ( bahG_  > bahMaxGenMixUs ) bahMaxGenMixUs = bahG_;
+        if ( bahFillUs  > bahMaxFillUs   ) bahMaxFillUs   = bahFillUs;
+        if ( bahBlockUs > bahMaxBlockUs  ) bahMaxBlockUs  = bahBlockUs;
+        if ( bahC_  > bahMaxCpuUs    ) bahMaxCpuUs    = bahC_;
+        bahSumCpuUs += bahC_;
+        bahCount++;
+        if ( bahC_ > (uint32_t)DMA_BUF_TIME ) bahOverruns++;
+      }
+#endif
 
  //   }
     
@@ -513,6 +554,56 @@ void regular_checks() {
            (int)(Drums.GetOobReads() - reported));
       reported = Drums.GetOobReads();
     }
+  }
+#endif
+
+#if BENCH_AUDIO_HEADROOM
+  // M1's precondition, reported from here for the same reason as the warning above:
+  // audio_task1 is IRAM and must not print. Read-and-clear rather than accumulate, so
+  // the maxima are per-window and a single bad buffer shows up in the window it
+  // happened instead of being averaged away by the rest of the run.
+  static uint32_t bahLast = 0;
+  static bool     bahLegend = false;
+  uint32_t bahNow = millis();
+  if ( bahNow - bahLast >= (uint32_t)BAH_MS ) {
+    bahLast = bahNow;
+    if ( !bahLegend ) {
+      bahLegend = true;
+      DEBF("[BAH] core-0 load: worst buffer vs the %d us the DMA gives it. "
+           "cpu = generators + mixer + float->int16. block = time parked in I2S.write(), "
+           "which is the DMA pacing us and is NOT our cost.\r\n", (int)DMA_BUF_TIME);
+    }
+    if ( bahCount > 0 ) {
+      // Percentages as hundredths of a percent so no float formatting is needed here;
+      // this is printf territory on core 1, but keeping it integer keeps it honest.
+      uint32_t bahWorstPct = (bahMaxCpuUs   * 10000u) / (uint32_t)DMA_BUF_TIME;
+      uint32_t bahMeanUs   = bahSumCpuUs / bahCount;
+      uint32_t bahMeanPct  = (bahMeanUs    * 10000u) / (uint32_t)DMA_BUF_TIME;
+      DEBF("[BAH] worst cpu=%u us = %u.%02u%% (gen+mix %u / fill %u)  "
+           "mean cpu=%u us = %u.%02u%%  block max=%u us  overruns=%u of %u buffers\r\n",
+           (unsigned)bahMaxCpuUs,    (unsigned)(bahWorstPct / 100u), (unsigned)(bahWorstPct % 100u),
+           (unsigned)bahMaxGenMixUs, (unsigned)bahMaxFillUs,
+           (unsigned)bahMeanUs,      (unsigned)(bahMeanPct / 100u), (unsigned)(bahMeanPct % 100u),
+           (unsigned)bahMaxBlockUs,  (unsigned)bahOverruns, (unsigned)bahCount);
+      // bahCount is also an independent check on the sample rate: it counts buffer
+      // refills, so count * DMA_BUF_LEN / window seconds should come out at 44100.
+      // If this number ever disagrees with the mixer() rate M0 measured, one of the
+      // two is lying.
+      //
+      // 64-bit on purpose. The 32-bit form (count * DMA_BUF_LEN * 1000 / BAH_MS) works
+      // at BAH_MS 1000 and silently wraps if anyone raises the window, which is exactly
+      // the kind of thing that is correct on the bench and wrong in the field.
+      DEBF("[BAH] buffer rate check: %u buffers in %d ms = %u Hz (expect %d)\r\n",
+           (unsigned)bahCount, (int)BAH_MS,
+           (unsigned)(((uint64_t)bahCount * (uint64_t)DMA_BUF_LEN * 1000ULL)
+                      / (uint64_t)BAH_MS),
+           (int)SAMPLE_RATE);
+    } else {
+      DEBF("[BAH] core0: no buffers completed in %d ms -- audio_task1 is not running\r\n",
+           (int)BAH_MS);
+    }
+    bahMaxGenMixUs = 0; bahMaxFillUs = 0; bahMaxBlockUs = 0; bahMaxCpuUs = 0;
+    bahSumCpuUs = 0; bahCount = 0; bahOverruns = 0;
   }
 #endif
 

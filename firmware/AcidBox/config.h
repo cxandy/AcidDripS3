@@ -151,6 +151,49 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
               sizeof(out_buf[current_out_buf]._signed)); }
 #endif
 
+/* BENCH_AUDIO_HEADROOM: how much of each buffer period does the audio actually cost? */
+#define BENCH_AUDIO_HEADROOM 1  // M1's precondition. The priority 1 -> 5 change that
+                        // fixed the starving loop() was a guess, and guessing is what
+                        // cost M0 a full round of bench diagnosis. Measure, then build.
+                        //
+                        // What "headroom" means here, precisely, because the obvious
+                        // reading is the wrong one: audio_task1 is pinned to core 0 at
+                        // priority 5 and spins on taskYIELD(), so a task-utilisation
+                        // reading would just say core 0 is 100% busy and tell us
+                        // nothing. The spin is not the cost. What matters is the time
+                        // spent doing work per buffer against the 725 us the DMA gives
+                        // it -- because when the work exceeds the period the buffer is
+                        // not refilled in time, the DMA underruns, and the DAC holds its
+                        // last sample. That is the noise M0 just spent a milestone on.
+                        //
+                        // So the number that matters is the WORST buffer, not the mean.
+                        // An average of 300 us is worth nothing next to one buffer that
+                        // took 800; audio failures live in the tail.
+                        //
+                        // Set to 0 to strip it. Like M0_DIAG, everything stays behind
+                        // this one switch, so it can come back if M3 needs re-measuring
+                        // after the TFT work lands on core 0.
+#define BAH_MS 1000        // report window. Long enough that the worst buffer in it is
+                        // a fair sample of the worst, short enough to watch a break or
+                        // a fill arrive.
+#if BENCH_AUDIO_HEADROOM
+  // Written by audio_task1 (IRAM, plain stores only, never printed from there) and
+  // read and cleared by regular_checks() in normal task context on core 1.
+  //
+  // bahMaxGenMixUs / bahMaxFillUs are kept apart on purpose: once M1 lands extra
+  // engines, "we are at 80%" is useless, but "the generator side went from 200 us to
+  // 600 us" tells you exactly where to look.
+  extern volatile uint32_t bahMaxGenMixUs;   // worst buffer: synth1+synth2+drums+mixer
+  extern volatile uint32_t bahMaxFillUs;     // worst buffer: float -> int16 conversion
+  extern volatile uint32_t bahMaxBlockUs;    // worst buffer: time blocked inside I2S.write()
+  extern volatile uint32_t bahMaxCpuUs;      // worst buffer: genMix + fill, the real cost
+  extern volatile uint32_t bahSumCpuUs;      // total over the window, for the mean
+  extern volatile uint32_t bahCount;         // buffers in the window
+  extern volatile uint32_t bahOverruns;      // buffers whose CPU cost exceeded the period
+  extern volatile uint32_t bahFillUs;        // hand-off from i2s_output() to audio_task1
+  extern volatile uint32_t bahBlockUs;
+#endif
+
 float bpm = 130.0f;
 
 #ifdef USE_INTERNAL_DAC

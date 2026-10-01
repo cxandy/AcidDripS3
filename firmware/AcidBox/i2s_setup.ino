@@ -106,6 +106,13 @@ void i2sDeinit() {
 
 static inline void i2s_output () {
 // now out_buf is ready, output
+#if BENCH_AUDIO_HEADROOM
+  // Two phases that must be timed separately, because only one of them is our cost.
+  // The conversion loop is CPU work and belongs in the headroom budget. The write
+  // blocks until the DMA has room, and that block IS the 725 us period -- measuring it
+  // as our cost would just report the period back and always read 100%.
+  uint32_t bahFillT0_ = micros();
+#endif
 #if M0_DIAG
   m0I2SCalls++;
 #endif
@@ -120,6 +127,18 @@ static inline void i2s_output () {
       out_buf[current_out_buf]._signed[i*2+1] = 0;
     }
     M0_I2S_WRITE();
+#if BENCH_AUDIO_HEADROOM
+    // Stamped on this path too, not just the normal one. audio_task1 accumulates
+    // whatever it finds in bahFillUs once this call returns, so leaving the previous
+    // normal-mode value in place would have mode 2 charge itself for a path it is not
+    // running -- a diagnostic that reports plausible numbers for the wrong thing is
+    // worse than one that reports nothing.
+    {
+      uint32_t bahFillT2_ = micros();
+      bahFillUs = bahFillT2_ - bahFillT0_;
+      bahBlockUs = micros() - bahFillT2_;
+    }
+#endif
     return;
   }
 #endif
@@ -130,7 +149,14 @@ static inline void i2s_output () {
    
    //if (out_buf[out_buf_id][i*2]) DEBF(" %d\r\n ", out_buf[out_buf_id][i*2]);
   }
+#if BENCH_AUDIO_HEADROOM
+  uint32_t bahFillT1_ = micros();
+  bahFillUs = bahFillT1_ - bahFillT0_;
+#endif
   M0_I2S_WRITE();
+#if BENCH_AUDIO_HEADROOM
+  bahBlockUs = micros() - bahFillT1_;
+#endif
 }
 
 

@@ -186,11 +186,19 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
    **必须在 M1 之前做**——否则 M3 的音序器和 TFT 是踩在一个"我记得好像够"的
    基线上，而不是一个量出来的数字上。这是从 M0 换来的教训：这里原本是拍脑袋写的
    优先级 1→5，代价是 `loop()` 被饿死一整轮排查（§7）。
-2. **确认板子真实的 `FlashSize`**，以及 `MIDIUSB_ESP32.h` 与 Arduino 默认
-   `USBMode`（TinyUSB）的关系。
-3. **修 `HARDWARE_SETUP.md` 的 `:149` 和 `:171`**（§5 表里那两行），顺手删掉
-   `config.h` 里已移除的 `M0_REVERB_TOGGLE_PIN` 相关残留说明。
-4. 决定 remote 要不要换 SSH（§2.1），不影响功能。
+2. **确认板子真实的 `FlashSize`**（FQBN 现在写的是 `FlashSize=16M`，**是声明，不是实测**）。
+   注意"能启动"证明不了：16 MB 的 `noota_3g` 分区表最大一个分区到 ~3.4 MB，
+   整张表结束在 6.2 MB 以内，所以 8 MB 的片子启动行为**完全一样**。
+   真正的确认在 bootloader 的 flash size 那一行，而它会镜像到 USB-OTG
+   （`CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG 1`），所以**冷启动日志的前 20 行**就有答案。
+3. ~~修 `HARDWARE_SETUP.md` 的 `:149` 和 `:171`~~ —— **已完成**。两处都错了，
+   而且不止两处：§4 整节是按"板子上有两个口"写的，实际只有一个能用。
+   详见 §5 表最后一行。
+   `M0_REVERB_TOGGLE_PIN` 的残留**查过了，没有**：全仓库只剩两处提到 GPIO23
+   的注释（`config.h:89`、`AcidBox.ino:614`），两处都是在解释"为什么放弃了它"，
+   内容正确，留着。
+4. remote 保持 **HTTPS**，不换 SSH。公开仓库用 HTTPS 免密钥，换过去没有收益。
+   已确认 `HANDOFF` 旧版"remote 是 SSH"的说法从来就不成立。
 
 **然后进 M1**：`engine_iface.h` / `.cpp`，**重新实现** `Acid_Drip` 的行为
 （它的代码不能进仓库，见 §2.3）。M2 才关掉 `JUKEBOX`。

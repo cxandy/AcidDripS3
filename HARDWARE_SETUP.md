@@ -130,34 +130,43 @@ GND              ──►  GND
 
 ---
 
-## 4. USB：板子上有两个口
+## 4. USB：板子上只有一个 USB 口能用
 
-`config.h:6` 有 `#define BOARD_HAS_UART_CHIP`，于是 `:128-131`：
+**这块板子（ESP32-S3-WROOM，OPI PSRAM）只有一个 USB 连接器：USB-OTG
+（GPIO19/20，芯片内置）。** 下面这些是 M0 用三次失败的日志构建换来的，每一条都有代价：
 
-```c
-#define MIDI_PORT_TYPE HardwareSerial
-#define MIDI_PORT      Serial
-#define DEBUG_PORT     Serial
-```
-
-`Serial` 在 S3 上就是 **UART0**，走板载 USB-UART 桥。而 `MIDI_USB_DEVICE` 走 TinyUSB，走**原生 USB 口**。所以两个口各干一件事：
-
-| USB 口 | 芯片 | 干什么 | M0 里有没有用 |
+| USB 口 | 芯片 | 干什么 | 现状 |
 |---|---|---|---|
-| **USB / USB-OTG**（GPIO19/20） | ESP32-S3 内置 | USB MIDI（设备名 `AcidBox S3`，VID `1209` / PID `1305`） | ✅ 用来验 MIDI |
-| **UART** | 板载 CH343 / CP2102 等 | 烧录（Serial/JTAG） | ✅ 烧录必需 |
-| 原生 USB | — | `DEBUG_PORT` 输出 | ❌ M0 见下 |
+| **USB-OTG**（GPIO19/20） | ESP32-S3 内置 | **串口日志**（`DEBUG_PORT` = `HWCDCSerial`）、USB MIDI、烧录 | ✅ 日志已验证 |
+| UART0（GPIO43/44） | —— | —— | ❌ **没有接到这个连接器上** |
 
-> ESP32-S3-DevKitC-1 上两个口丝印是 `USB` 和 `UART`。别插错。
+### `DEBUG_PORT` 走 USB-OTG，不走 UART
 
-### ⚠️ 关于串口日志：M0 阶段是空的
+`config.h:184` 把 `DEBUG_PORT` 定为 `HWCDCSerial`，也就是**原生 USB**。
+标记行 `[M0] probe: HWCDC (native USB) begin ok` 就是这件事的证据。
 
-`firmware/AcidBox/config.h:19` 把 `DEBUG_ON` 注释掉了（这是 M0 改动之一），
-所以 `DEB()` / `DEBF()` / `DEBUG()` 三个宏全部展开为空。
-全工程只有两处串口调用，都在宏后面（`AcidBox.ino:251`、`midi_handler.ino:4`）。
+`config.h:6` 那个 `#define BOARD_HAS_UART_CHIP` **不代表 UART0 接到了可见的连接器**。
+这块板子上 GPIO43/44 没有引出来。曾经有三轮构建"一个字节都不输出"，全部是这个原因：
+代码往 `Serial`（UART0）写，而 UART0 在空中。
 
-**结果：M0 上电后串口一个字节都不会输出。**
-验收只能靠耳朵 + MIDI 活动监视器。要看日志的话把 `DEBUG_ON` 打开重编，但那会吃掉实时任务的 tick（作者自己的注释就这么警告），正式验收前记得关掉。
+> `rst:0x15 (USB_UART_CHIP_RESET)` **不是**板上有 USB-UART 桥的证据。
+> 终端重连也会复位芯片并重新打印这一行——所以它出现反而容易把人引向错误的排查方向。
+
+### 串口日志在 M0 之后是通的
+
+`config.h:26` 现在 **`DEBUG_ON` 是打开的**，`DEBF()` 生效，日志从 **USB-OTG** 出来。
+
+IDF 那边 `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG 1`，所以 ROM 和 bootloader
+的消息也会镜像到同一个 USB-OTG 口上——这就是为什么 `rst:` 那些行你也能看到。
+
+**代价：`DEBUG_ON` 会吃掉 tick**（作者自己在 `config.h:26` 的注释里就这么警告）。
+之所以在出货构建里仍然开着：音频任务现在是优先级 5、各占一核、且都不空转，
+日志从优先级 1 的 `loop()` 走，碰不到音频路径。换来的东西更值钱——开机能看到
+采样套装载了多少 cache，外加常驻的采样游标越界告警。等有硬件能盯着它了再关。
+
+**注意：重新打开 `MIDI_USB_DEVICE` 会再次把 `DEBUG_ON` 关掉**（`config.h:257`，
+作者自己的 guard，`#if defined(MIDI_VIA_SERIAL) || defined(MIDI_USB_DEVICE)`）。
+这是预期行为，不是 bug —— 日志会消失，别以为板子坏了。
 
 ---
 
@@ -168,7 +177,10 @@ GND              ──►  GND
 **按住 `BOOT` → 点一下 `RST` → 松开 `BOOT`**。
 之后 COM 口应该出现一个设备（Windows 上叫 `USB JTAG/serial debug unit` 之类）。
 
-板子上如果只有一个 USB 口，只能用它烧录，USB MIDI 就用不了——那种板子要先解决 `USBMode` 的问题再说。
+板子上如果只有一个 USB 口（**这块就是**），烧录和 USB MIDI 共用 USB-OTG——
+这没问题，USB 能复合设备。**真正的冲突不是端口，是日志**：`MIDI_USB_DEVICE`
+一开就会把 `DEBUG_ON` 关掉（见 §4）。要同时要 MIDI 和日志，得改作者的 guard，
+不能两头都要。
 
 ### 5.2 拿产物
 

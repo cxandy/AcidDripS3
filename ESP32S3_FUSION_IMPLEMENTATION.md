@@ -133,6 +133,15 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 | 独立调音表 `tuning[128]` 经 `CC_303_TUNING`(104) | synthvoice.ino:207-210 |
 | 滑音为**逐采样**插值（`_slideMs` + period 追赶） | synthvoice.h:120-133, synthvoice.ino:221-229 |
 
+> ⚠️ **本表有 3 行已被 M0 实测推翻，读的时候按下面这份更正读。** 设计文档本身
+> 不追改，免得动到 M1–M4 的契约；差异全部记在 `HANDOFF.md` §7。
+>
+> | 原表 | 实际 |
+> |---|---|
+> | `MIDI_USB_DEVICE` 默认开启（:124） | 我们这边**已关**（约定如此）。FQBN 仍保持 `USBMode=hwcdc,CDCOnBoot=cdc` |
+> | `DEBUG_ON` 必须关（:125） | **推翻。** 现在开着且故意开着。理由：音频任务已是优先级 5、各占一核、不空转，日志走 `loop()`（优先级 1）碰不到音频路径；换来开机 cache 用量和常驻的采样越界告警 |
+> | 音频任务优先级 1，须提（:128） | **已提，提到 5。** 但真正的问题不是数字小：`audio_task2` 原来在 core 1 用 `taskYIELD()` 空转，而 `taskYIELD` 只让给同级或更高优先级，于是把同核的 `loopTask` 永久饿死，`loop()` 一次都没跑过。修法是 `vTaskDelay(1)`，不是调优先级 |
+
 ### 4.2 Acid_Drip 侧
 
 | 事实 | 位置 |
