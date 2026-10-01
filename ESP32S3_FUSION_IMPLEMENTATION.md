@@ -178,6 +178,67 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 
 **验收**：稳定出声，无周期性爆音，串口打印 core 0 占用率 < 50%。
 
+#### M0 实际执行结果（截至 2026-10-01）
+
+源码已 vendored 进仓库 `firmware/AcidBox/`，CI 编译通道打通。**编译侧全部通过；上板验收仍待硬件。**
+
+**已完成的代码改动（3 处，均带 `M0:` 注释）**
+
+| # | 位置 | 改动 | 理由 |
+|---|---|---|---|
+| 1 | `config.h:19` | 注释掉 `DEBUG_ON` | 作者自己建议关闭 |
+| 2 | `config.h` 约 147 行 | 重写 `#undef DEBUG_ON` 的守卫 | 见下 |
+| 3 | `AcidBox.ino:301-302` | 任务优先级 `1` → `5` | 为后续 TFT/音序器留余量 |
+
+**发现的两个上游缺陷**
+
+1. **`config.h` 的守卫是无效的。** 原文：
+
+   ```c
+   #ifdef MIDI_VIA_SERIAL || MIDI_USB_DEVICE
+     #undef DEBUG_ON
+   #endif
+   ```
+
+   `#ifdef` 只接受一个标识符，GCC 会对 `|| MIDI_USB_DEVICE` 报 *extra tokens at end of #ifdef directive* 并丢弃。也就是说这个守卫**只测过 `MIDI_VIA_SERIAL`**——而它默认就是关的。结果是：即便开着 `MIDI_USB_DEVICE`，`DEBUG_ON` 依然生效，作者为它加的自动关闭机制从来没工作过。已按 `AcidBox.ino:36` 的正确写法重写。
+
+2. **`i2s_write(..., portMAX_DELAY)` 在 core 3.x 上是死代码。** 那两行位于 `#if ESP_ARDUINO_VERSION_MAJOR < 3` 分支内。3.x 走 `I2S.write()`，默认超时为 0，本来就是非阻塞。M0 第 6 步因此**无需改动**，不是因为已经改了，而是因为那段代码不会被编译。
+
+**此前一个错误推断已更正**：`JUKEBOX` 开着并不会造成 `setup()`/`loop()` 重复定义。`AcidBanger.ino` 里那两个函数（:1190 / :1294）位于 `/* ... */` 块注释中，该文件不定义任何符号。因此 M0 保留 `JUKEBOX` 开启以维持真正的上游基线；关闭它属于 M2（音序器接管之后）。
+
+**构建通道：为什么是 CI 而不是本地**
+
+本机无法安装 ESP32 core。`arduino-cli` 的工具链（xtensa-esp-elf 等，约 1.5 GB）从 `raw.githubusercontent.com` 拉取，而该地址在本网络被重置。改用 GitHub Actions，见 `.github/workflows/build.yml`。
+
+**三个静默踩坑，均已修正并写入 workflow 注释**
+
+| 坑 | 后果 |
+|---|---|
+| 上游 README 的 "No OTA (1MB APP/3MB SPIFFS)" 在 core 3.x 里叫 `noota_3g`，不是 2.x 的 `min_spiffs` | 照抄 2.x 教程会**编译通过但分区错误**，2.5 MB 音色装不下。已对 `boards.txt` @ `3.3.12` 核实 |
+| `MIDI Library` 必须用 **5.x** | 4.x 的 `midi::MidiType` 只有 `SystemExclusive`，没有 `SystemExclusiveStart`/`End`，而 AcidBox vendored 的 `src/usbmidi` 依赖这两个名字，4.x **无法编译**。5.0.0 由 `lathoub`（vendored 传输层作者）共同署名，即其目标版本 |
+| Library Manager 里的名字是 `MIDI Library`，不是仓库名 `arduino_midi_library` | 直接写仓库名会装不上 |
+
+**已确认的两件事**
+
+- **TinyUSB MIDI 是开启的。** `MIDIUSB_ESP32.h` 整个包在 `#if CONFIG_TINYUSB_MIDI_ENABLED` 里，为 0 时该类不存在，而 `USB-MIDI.h:84` 在 ESP32 上无条件调用 `MidiUSB.begin()`——编译能过，就证明该宏为 1。这条原本列为风险，现已闭环。
+- **固件 806 KB，装得进 1 MB 分区。** 剩余约 223 KB，M1–M4 的增量（音序器 + TFT + FX）需要留意这个余量。
+
+**编译配置**
+
+```
+esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
+```
+
+`PSRAM=opi` 是硬需求：`PRELOAD_ALL` 的 `PSRAM_SAMPLER_CACHE` 为 3 MB，QSPI 不够。`FlashSize=16M` 是推测值，需按实际板子确认。`USBMode`/`CDCOnBoot` 保持 Arduino 默认不指定，原因见 `firmware/README.md`。
+
+**仍未完成（阻塞于无硬件）**
+
+- 烧录与出声验证
+- `BENCH_AUDIO_HEADROOM` 仪表移植与 core 0 余量实测
+- LittleFS 镜像构建与上传（`data/` 2.5 MB，依赖 `noota_3g` 的 3 MB 分区）
+
+本机无 ESP32-S3 在位：所有相关 PnP 条目（`VID_303A&PID_1001`、`USB-SERIAL CH340 (COM5)` 等）状态均为 Unknown，属残留记录，实际只有主板的 `COM1`。
+
 ---
 
 ### M1 — 事件接口层（1-2 天）

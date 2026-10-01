@@ -3,9 +3,11 @@
 Fusion of two open synth projects into one ESP32-S3 firmware: AcidBox's 303-class
 DSP engine driving Acid Drip's 16-step sequencer, pad gestures, and TFT UI.
 
-> **Status: design phase.** Software architecture and implementation plan are
-> complete and committed. No firmware code has been written yet — milestones M0
-> onward are unstarted.
+> **Status: M0 — baseline builds.** The plan is complete and committed, the
+> AcidBox DSP layer is vendored at `firmware/AcidBox/`, and GitHub Actions
+> compiles it green (806 KB binary). On-hardware verification — flashing, audio,
+> core-0 headroom — is still outstanding, because no ESP32-S3 is currently
+> attached. M1 onward is unstarted.
 
 ## The idea in one paragraph
 
@@ -35,6 +37,16 @@ verified source citations, milestones M0–M5 with acceptance criteria, a risk
 register, and the V5→AcidBox parameter mapping table.
 
 Roughly 8–12 days of software work.
+
+## Building
+
+Push to `main`, or run the **build** workflow. It installs arduino-cli and the
+ESP32 core, compiles the sketch, and uploads the `.bin` as an artifact. The
+toolchain is ~1.5 GB and cached between runs.
+
+Target is `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M`.
+See **[firmware/README.md](firmware/README.md)** for why each of those is the
+value it is, and for the three changes made to the vendored source.
 
 ## Upstream projects
 
