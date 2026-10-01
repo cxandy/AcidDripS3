@@ -205,7 +205,11 @@ jobs:
             0xe000 boot_app0.bin 0x10000 firmware.bin
           EOF
 
-          ls -l "$build"/*.bin "$build"/flash-args.txt
+          # Checksums so the download can be verified. Windows has certutil,
+          # macOS/Linux have shasum, so this needs no extra tooling either way.
+          ( cd "$build" && sha256sum ./*.bin > SHA256SUMS.txt )
+
+          ls -l "$build"/*.bin "$build"/*.txt
 
       - name: Build the LittleFS drum kit image
         if: success()
@@ -273,7 +277,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: AcidDripS3-firmware
-          path: ${{ runner.temp }}/build/*.bin
+          # *.txt as well as *.bin: flash-args.txt is the paste-ready
+          # command line and SHA256SUMS.txt verifies the download. An
+          # earlier version globbed only *.bin and quietly shipped neither,
+          # while the docs promised flash-args.txt was in there.
+          path: |
+            ${{ runner.temp }}/build/*.bin
+            ${{ runner.temp }}/build/*.txt
           if-no-files-found: error
 
       - name: Upload LittleFS image
@@ -333,4 +343,23 @@ jobs:
             echo '```'
             grep -E 'Sketch uses|Global variables' build.log || echo "(not in log)"
             echo '```'
+            echo
+            echo "### Files in AcidDripS3-firmware"
+            echo
+            echo "| file | bytes | sha256 (first 16) |"
+            echo "|---|---|---|"
+            bundle="${{ runner.temp }}/build"
+            if [ -d "$bundle" ]; then
+              for f in "$bundle"/*.bin "$bundle"/*.txt; do
+                [ -e "$f" ] || continue
+                echo "| $(basename "$f") | $(stat -c%s "$f") | $(sha256sum "$f" | cut -c1-16) |"
+              done
+            else
+              echo "| (build failed, no bundle) | - | - |"
+            fi
+            echo
+            echo "Sizes here are real bytes, not the compressed artifact size."
+            echo "Browser flashing needs bootloader + partitions + boot_app0 + firmware"
+            echo "at 0x0 / 0x8000 / 0xe000 / 0x10000, plus littlefs.bin at 0x110000"
+            echo "from the other artifact."
           } >> "$GITHUB_STEP_SUMMARY"

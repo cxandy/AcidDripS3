@@ -176,12 +176,14 @@ GND              ──►  GND
 
 | artifact | 内容 |
 |---|---|
-| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`firmware.bin`、`boot_app0.bin`、`flash-args.txt` |
+| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`firmware.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` |
 | `AcidDripS3-littlefs` | `littlefs.bin`（鼓组音色，见 §6） |
 
 `--export-binaries` 会把三个 `.bin` 放进构建目录；`boot_app0.bin` 来自 core 内部的
 `tools/partitions/`，CI 里的 *Assemble the flash bundle* 步骤负责把它复制进来。
 四个偏移量也由那一步写进 `flash-args.txt`，**不用照抄任何网上的教程**（包括本文档）。
+
+不想装 esptool 就走 §5.5 的浏览器烧写。
 
 ### 5.3 装 esptool
 
@@ -224,6 +226,70 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
 当前 `firmware.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
 （GitHub Actions 页面上 `AcidDripS3-firmware` artifact 显示的 806 KB 是**压缩包**大小，不是固件大小。）
 M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个余量。
+
+### 5.5 完全不装软件：浏览器烧写
+
+**先说 web.esphome.io：能用一半，但不要用它。**
+
+|  | web.esphome.io | espressif.github.io/esptool-js |
+|---|---|---|
+| 出品方 | ESPHome | Espressif 官方（`esptool` 的 WebAssembly 版） |
+| 文件槽位 | **固定 4 个**（bootloader / partitions / boot_app0 / firmware） | **任意多个，每个自己填地址** |
+| 能刷 `littlefs.bin` | **不能** | 能 |
+| 需要 HTTPS + Chrome/Edge | 是 | 是 |
+
+它的四个默认偏移是 `0x0 / 0x8000 / 0xe000 / 0x10000`，**和 `noota_3g` 完全一致**，
+所以固件那部分它能刷对。但它没有文件系统槽位，鼓组还得回去用 esptool 烧——
+于是变成"浏览器刷固件 + 命令行刷鼓组"两套流程，还得保持两个工具的产物同源。
+用 ESP Web Tools 一次做完。
+
+**关键：必须插原生 USB 口（USB OTG，GPIO19/20），不能插 UART 桥。**
+
+CH340 / CP2102 / FTDI 这类桥片芯片 Chrome 的 Web Serial **认不出来**。
+（页面顶上那个 `WebUSB (CH340)` 勾选框是另一条路：走 WebUSB 直通，但在
+Windows / macOS / Linux 上 usbserial 内核驱动会先占住那个接口，
+`claimInterface` 直接失败——页面上那段小字说的就是这件事。
+只有 Android / Chrome OTG 才稳。我们是桌面机，别走这条。）
+
+原生 USB 口在 S3 上是**固定功能**的 USB-Serial-JTAG 外设，GPIO19/20，
+和固件无关。所以按住 BOOT 进 ROM 下载模式时它一定会枚举出来。
+
+**步骤（ESP Web Tools）：**
+
+1. Chrome 或 Edge 打开 <https://espressif.github.io/esptool-js/>
+   （Safari 不支持；Firefox 没有 Web Serial）
+2. 按住 `BOOT` → 点 `RST` → 松开 `BOOT`
+3. Baudrate 选 `921600` → 点 **Connect** → 确认认出 `ESP32-S3`
+4. Flash Mode **keep** / Flash Freq **keep** / Flash Size **keep**
+5. 点 **Add File** 加满五行：
+
+| Flash Address | File | 来自 |
+|---|---|---|
+| `0x0` | `bootloader.bin` | `AcidDripS3-firmware` |
+| `0x8000` | `partitions.bin` | `AcidDripS3-firmware` |
+| `0xe000` | `boot_app0.bin` | `AcidDripS3-firmware` |
+| `0x10000` | `firmware.bin` | `AcidDripS3-firmware` |
+| `0x110000` | `littlefs.bin` | `AcidDripS3-littlefs` |
+
+6. 点 **Program**
+
+**五行必须一次性全填上再点 Program。** LittleFS 那一行不能省、也不能事后补刷：
+`FORMAT_LITTLEFS_IF_FAILED true` 会在挂不上时自动格式化，
+只刷固件就上电 → 鼓组变 8-bit fallback，还很容易误判成"刷成功了"。
+
+三个 Flash 选项都选 **keep**：arduino-cli 编译时已经按 `FlashSize=16M` 把
+flash size / mode / freq 写进镜像头里了，工具再改一遍只会引入偏差。
+
+**其他注意：**
+
+- **别点 `Erase Flash`。** 不需要，而且点完再只刷一部分，就把前面写的擦了。
+- 刷完之后原生 USB 口变成 **TinyUSB MIDI 设备**（`AcidBox S3`），不再是串口。
+  要再刷就重新 BOOT+RST 进下载模式——正常现象，不是坏了。
+- 想核对下载的东西对不对，artifact 里有 `SHA256SUMS.txt`：
+
+  ```powershell
+  Get-FileHash firmware.bin -Algorithm SHA256
+  ```
 
 ---
 
@@ -276,7 +342,8 @@ sampler.ino:119  if ( !LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED)) { ... return; 
 AcidDripS3-littlefs / littlefs.bin
 ```
 
-用 core 自带的 `esptool` 烧（core 里 `tools/flasher.py` 的等价物），偏移是分区表里的 `0x110000`：
+用 core 自带的 `esptool` 烧（core 里 `tools/flasher.py` 的等价物），偏移是分区表里的 `0x110000`。
+**推荐直接走 §5.5，把这一行和固件那四行一起在浏览器里刷掉**：
 
 ```powershell
 python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
