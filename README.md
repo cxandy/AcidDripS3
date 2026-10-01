@@ -60,4 +60,4 @@ Both directories are gitignored. Work against them in place.
 
 Fusion source: not yet licensed.
 
-AcidBox-derived files remain under MIT — see [LICENSE-NOTICE.md](LICENSE-NOTICE.md).
+AcidBox-derived files remain under MIT — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

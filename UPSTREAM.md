@@ -16,8 +16,10 @@ copyright that means no grant to copy, modify, or redistribute. Committing its s
 into a third repository — even a private one — is a different act from the personal
 use its author invited. Both are therefore gitignored here and fetched on demand.
 
-The AcidBox MIT notice is reproduced in `LICENSE-NOTICE.md` because the fusion
-firmware derives from AcidBox source files.
+The AcidBox MIT notice is reproduced in `THIRD-PARTY-NOTICES.md` because the fusion
+firmware derives from AcidBox source files. The filename is deliberately not
+`LICENSE*`: GitHub's license detector would otherwise label this whole
+repository MIT, which is not true of the fusion source itself.
 
 ## Pinned versions
 
