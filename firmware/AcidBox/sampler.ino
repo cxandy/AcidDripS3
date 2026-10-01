@@ -212,7 +212,7 @@ void Sampler::Init() {
         if ( (buffPointer + toRead) > (size_t)SAMPLER_CACHE_SIZE ) {
           // %.*s, not %s: filenames[] is filled by a strncpy(...,32) that does not
           // terminate when the path is 32 chars or longer, so it may not be NUL ended.
-          DEBUG("[M0] RAMCACHE FULL at sample %d (%.*s): have %d, wanted %d more, cap %d",
+          DEBF("[M0] RAMCACHE FULL at sample %d (%.*s): have %d, wanted %d more, cap %d\r\n",
                 i, 31, filenames[i], (int)buffPointer, (int)toRead, (int)SAMPLER_CACHE_SIZE);
           len = 0;
           break;
@@ -227,7 +227,7 @@ void Sampler::Init() {
       // uses it to advance a float cursor, so a nonsense rate is enough to make the
       // play position run away. Report it here, in setup(), where printing is safe.
       if ( (wav.sampleRate == 0) || (wav.sampleRate > 192000) ) {
-        DEBUG("[M0] BAD HEADER sample %d (%.*s): sampleRate=%d dataSize=%d",
+        DEBF("[M0] BAD HEADER sample %d (%.*s): sampleRate=%d dataSize=%d\r\n",
               i, 31, filenames[i], (int)wav.sampleRate, (int)wav.dataSize);
       }
       
