@@ -1,25 +1,28 @@
 # UPSTREAM
 
-This repository contains **only** the fusion project's own planning documents and
-source. Neither upstream project is vendored here — both are fetched separately
-and referenced by pinned commit.
+Two upstream projects feed this one.
 
-## Why they are not committed here
+| Upstream | License | Handling |
+|---|---|---|
+| [`copych/AcidBox`](https://github.com/copych/AcidBox) | **MIT**, (c) 2022 copych | **Vendored** at `firmware/AcidBox/`, then modified. Clone at the repo root is a pristine reference copy. |
+| [`lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth`](https://github.com/lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth) | **None — all rights reserved** | Gitignored reference clone. Never committed. |
 
-| Upstream | License | Size on disk | Handling |
-|---|---|---|---|
-| [`copych/AcidBox`](https://github.com/copych/AcidBox) | **MIT** (c) 2022 copych | 67 MB | Fetch locally, do not redistribute |
-| [`lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth`](https://github.com/lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth) | **None — all rights reserved** | 43 MB | Fetch locally, do not redistribute |
+AcidBox is vendored because MIT permits it, and because the build has to work
+without network access to a 67 MB clone. Its source is ~559 KB; the rest of the
+clone — `data/` drum samples, `media/`, `hardware/` — is not committed, for
+reasons in `firmware/README.md`.
 
-AcidBox is permissive, but Acid_Drip ships **no LICENSE file at all**. Under default
-copyright that means no grant to copy, modify, or redistribute. Committing its source
-into a third repository — even a private one — is a different act from the personal
-use its author invited. Both are therefore gitignored here and fetched on demand.
+Acid_Drip ships **no LICENSE file at all**. Under default copyright that means
+no grant to copy, modify, or redistribute. Committing its source into a third
+repository — even a private one — is a different act from the personal use its
+author invited. So its code is read from the local clone and not committed.
+That constraint shapes the work: the sequencer and UI have to be written here
+rather than lifted wholesale, even though the plan is to port its behaviour.
 
-The AcidBox MIT notice is reproduced in `THIRD-PARTY-NOTICES.md` because the fusion
-firmware derives from AcidBox source files. The filename is deliberately not
-`LICENSE*`: GitHub's license detector would otherwise label this whole
-repository MIT, which is not true of the fusion source itself.
+The AcidBox MIT notice is reproduced in `THIRD-PARTY-NOTICES.md`. That filename
+is deliberate — it is not `LICENSE*` because GitHub's license detector would
+otherwise label this whole repository MIT, which is not true of the fusion code
+itself.
 
 ## Pinned versions
 
@@ -52,10 +55,12 @@ git clone https://github.com/lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth.gi
 Reference implementation is `src/Acid_Drip_Drum_Acid_Drift_V5` (~9,578 lines
 across four files). `src/Acid_Drip_Drum_Acid_V4` is the earlier, separate sketch.
 
-## What this repository does contain
+## What this repository contains
 
+- `firmware/AcidBox/` — the DSP layer, vendored from AcidBox and modified
 - `ESP32S3_FUSION_IMPLEMENTATION.md` — the design and implementation plan
 - `UPSTREAM.md` — this file
-- Fusion source, as it is written (M1 onward)
+- `THIRD-PARTY-NOTICES.md` — MIT notice for the vendored AcidBox source
 
-See `ESP32S3_FUSION_IMPLEMENTATION.md` §10 for the planned file layout.
+See `ESP32S3_FUSION_IMPLEMENTATION.md` §10 for the planned file layout, and
+`firmware/README.md` for how to build.

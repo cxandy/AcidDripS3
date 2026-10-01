@@ -1,11 +1,22 @@
-# ── Upstream clones: tracked as reference only, never vendored ──
+# ── Upstream clones: reference checkouts, kept outside git ──
 # AcidBox is MIT (c) 2022 copych — fetched via:
 #   git clone --depth 1 --branch S3-regular https://github.com/copych/AcidBox.git
-# Acid_Drip has NO upstream license — fetched via:
+# Its firmware source IS vendored under firmware/AcidBox/, as MIT requires
+# only that the copyright notice travel with it — see THIRD-PARTY-NOTICES.md.
+# The clone at the repo root is a pristine upstream copy, kept for diffing.
+#
+# Acid_Drip has NO upstream license, so it is NOT redistributed here. It is a
+# gitignored reference clone, fetched via:
 #   git clone https://github.com/lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth.git
-# Neither is redistributed in this repository. See UPSTREAM.md.
+# See UPSTREAM.md.
 /AcidBox/
 /Acid_Drip_Bassline_and_Drum_Synth/
+
+# AcidBox ships 2.5 MB of drum samples under data/. Those are samples rather
+# than source, and their provenance is less clear than the MIT grant covers,
+# so they are not committed. Copy them next to the sketch before building the
+# LittleFS image. See firmware/README.md.
+/firmware/AcidBox/data/
 
 # ── Arduino build output ──
 build/

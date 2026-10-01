@@ -1,0 +1,128 @@
+name: build
+
+# Compile the firmware with arduino-cli. We build in CI rather than locally
+# because the ESP32 toolchain is ~1.5 GB and this machine's network blocks
+# raw.githubusercontent.com, which is where arduino-cli fetches the tools from.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARDUINO_CLI_VERSION: 1.5.2
+  ESP32_CORE_VERSION: 3.3.12
+  MIDI_LIB_VERSION: 4.2.0
+
+  SKETCH_DIR: firmware/AcidBox
+
+  # Board: ESP32S3 Dev Module, as the AcidBox README specifies.
+  #
+  #   PSRAM=opi          OPI PSRAM. config.h enables PRELOAD_ALL, whose
+  #                      PSRAM_SAMPLER_CACHE is 3 MB, so QSPI is not enough.
+  #   PartitionScheme    The README says "No OTA (1MB APP / 3MB SPIFFS)". In
+  #   =noota_3g          core 2.x that menu entry was spelled "min_spiffs", but
+  #                      in 3.x `min_spiffs` means something else entirely
+  #                      ("Minimal SPIFFS, 1.9MB APP with OTA / 128KB SPIFFS")
+  #                      and the option we want is `noota_3g`. Getting this
+  #                      wrong fails silently -- it compiles, it just cannot
+  #                      hold the 2.5 MB of drum kits.
+  #   FlashSize=16M      Flash size of the target board. Raise if yours differs.
+  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache arduino-cli and the ESP32 core
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino
+            /usr/local/lib/arduino-cli
+          key: >-
+            arduino-${{ env.ESP32_CORE_VERSION }}-${{ env.MIDI_LIB_VERSION }}-${{ hashFiles('firmware/**') }}
+          restore-keys: |
+            arduino-${{ env.ESP32_CORE_VERSION }}-${{ env.MIDI_LIB_VERSION }}-
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL "https://downloads.arduino.cc/arduino-cli/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz" \
+            | sudo tar -xz -C /usr/local
+          arduino-cli version
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+
+      - name: Install MIDI Library
+        # Forty Seven Effects' arduino_midi_library. The Library Manager name
+        # is "MIDI Library", not "arduino_midi_library" (the repo name).
+        run: arduino-cli lib install "MIDI Library@${MIDI_LIB_VERSION}"
+
+      - name: Show resolved board options
+        run: arduino-cli board details -b esp32:esp32:esp32s3
+
+      - name: Check TinyUSB MIDI is compiled in
+        # MIDIUSB_ESP32.h is wrapped in #if CONFIG_TINYUSB_MIDI_ENABLED. If the
+        # prebuilt sdkconfig has it off, the class disappears and
+        # USBMIDI_CREATE_INSTANCE fails to compile with a confusing error.
+        # Report it explicitly so a failure here is never a mystery.
+        run: |
+          sdk=$(find ~/.arduino15/packages/esp32 -name sdkconfig.h -path '*s3*' | head -1)
+          echo "sdkconfig: $sdk"
+          if [ -n "$sdk" ]; then
+            grep -E 'TINYUSB_(MIDI|CDC)_ENABLED' "$sdk" || echo "no TINYUSB_* lines found"
+          fi
+
+      - name: Compile
+        run: |
+          set -o pipefail
+          arduino-cli compile \
+            --fqbn "$FQBN" \
+            --warnings default \
+            --clean \
+            --export-binaries \
+            --build-path "${{ runner.temp }}/build" \
+            "$SKETCH_DIR" 2>&1 | tee build.log
+
+      - name: Report warnings and sketch size
+        if: always()
+        run: |
+          echo "--- warning count ---"
+          grep -c 'warning:' build.log || echo 0
+          echo "--- warnings from our own sketch ---"
+          grep 'warning:' build.log | grep -F "$SKETCH_DIR" || echo "(none)"
+          echo "--- sketch size ---"
+          grep -E 'Sketch uses|Global variables' build.log || echo "(not in log)"
+
+      - name: Upload firmware binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AcidDripS3-firmware
+          path: ${{ runner.temp }}/build/*.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
