@@ -188,6 +188,9 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
    这是在 M1 之前做的——否则 M3 的音序器和 TFT 会踩在一个"我记得好像够"的
    基线上，而不是一个量出来的数字上。这是从 M0 换来的教训：这里原本是拍脑袋写的
    优先级 1→5，代价是 `loop()` 被饿死一整轮排查（§7）。
+   **门的位置改了**：查过代码之后发现引擎完全跑在 core 1，M1 加的是 core 0 零负载，
+   所以这个数字真正卡的是 **M3 决定"引擎要不要挪到 core 0"** 那一步，不是 M1。
+   M1 和本项可以并行。理由和证据见 §6.2。
 2. **确认板子真实的 `FlashSize`**（FQBN 现在写的是 `FlashSize=16M`，**是声明，不是实测**）。
    注意"能启动"证明不了：16 MB 的 `noota_3g` 分区表最大一个分区到 ~3.4 MB，
    整张表结束在 6.2 MB 以内，所以 8 MB 的片子启动行为**完全一样**。
@@ -254,6 +257,98 @@ offset `0x110000`），所以**不需要**单独烧 littlefs，也就不存在
 
 `BENCH_AUDIO_HEADROOM` 改回 `0` 提交（整套东西都关在这一个开关后面），
 把数字写进本节 §6.1，再进 M1。
+
+---
+
+## 6.2 M1 的设计决定（已查证，等 §6.1 的数字就可以动手）
+
+先查了代码，M1 有几件事和设计文档写的不一样。**都不是障碍，是必须提前知道的。**
+
+### M1 不需要等 §6.1 的数字——把门开在 M3 上
+
+设计文档的验收标准里没有提 core 归属，但查下来引擎**完全跑在 core 1**：
+
+```
+loop()                      AcidBox.ino:441，注释写明 "running on the Core1"
+  └─ regular_checks()       AcidBox.ino:446
+       └─ MIDI.read()       → MIDI Library 5.0.2 的回调
+            └─ handleNoteOn / handleCC / handlePitchBend   midi_handler.ino:54-119
+                 └─ Synth1 / Synth2 / Drums
+```
+
+`audio_task1`（core 0）和 `audio_task2`（core 1）**只读引擎状态，从不调用这些入口**。
+所以 `engine_iface` 只要把队列的消费点放在 `regular_checks()` 里，
+**core 0 的负载一点都不会变**。
+
+→ **§6.1 量出来的数字是 M3（MIDI+TFT）决定引擎放哪个核时需要的，不是 M1 需要的。**
+M1 和 §6.1 可以并行。之前把门卡在 M1 上是保守过头了：真正会加 core-0 负载的
+是"把引擎挪到 core 0"这个决定，而那个决定属于 M3。
+
+> 这不等于 M1 可以乱来。队列深度、事件结构大小、`eng_setParam` 的实现方式
+> 都会影响 RAM 和 core 1 的延迟——M1 自己要把这些量清楚。
+
+### `Ch` 和 MIDI 通道是干净的一一对应（已核对）
+
+| `Ch` | 通道 | 常量 | 出声 |
+|---|---|---|---|
+| `Acid` | 1 | `SYNTH1_MIDI_CHAN`（`config.h:231`） | `Synth1` |
+| `Second` | 2 | `SYNTH2_MIDI_CHAN`（`:232`） | `Synth2` |
+| `Drums` | 10 | `DRUM_MIDI_CHAN`（`:234`） | `Drums` |
+
+注意不是 1/2/3。**别按 1/2/3 推。**
+
+### 重音门限 80 是真的（已核对）
+
+`synthvoice.ino:223`：
+
+```cpp
+mva_alloc(note, (velocity >= 80));
+```
+
+所以设计文档的 `accent ? 127 : 79` 是对的：**79 落在门限下，127 落在门限上**，
+两边都留了余量。照抄即可。
+
+### 接口要抹平的两处不对称（这是 M1 真正存在的理由）
+
+1. **`Drums.NoteOff(note)` 不收力度，两个合成器的 `on_midi_noteOFF(note, vel)` 收。**
+   `eng_noteOff(Ch, note)` 得替两边补上。
+2. **`SetProgram` 只有 `Drums` 有**（`midi_handler.ino:113`）。
+   `eng_selectProgram(prog)` 对合成器只能是空操作——**但不能静默**，
+   必须留一条 `DEBF()` 警告，否则将来调用方会以为程序切换生效了。
+
+### `CC_ANY_*` 的语义必须原样保留（最容易做错的一处）
+
+`handleCC`（`midi_handler.ino:71-110`）的结构是**先按 CC 号全局匹配，
+再按通道路由**：
+
+```cpp
+switch (cc_number) {          // ← 不看 inChannel！
+    case CC_ANY_COMPRESSOR: ...
+    case CC_ANY_DELAY_TIME:  ...
+    case CC_ANY_RESET_CCS: case CC_ANY_NOTES_OFF: case CC_ANY_SOUND_OFF: ...
+    case CC_ANY_REVERB_TIME: case CC_ANY_REVERB_LVL: ...
+    default:                 // ← 只有落到这里才按通道分
+      if (inChannel == DRUM_MIDI_CHAN) ...
+```
+
+设计文档给的签名是 `eng_setParam(Ch ch, uint8_t cc, uint8_t val)`，通道受限。
+**照字面实现就会把上面这一整组全局 CC 全部丢掉**——压缩器、delay、reverb、
+notes-off 就此从音序器侧不可达，而且不会有任何报错。
+
+**决定：`eng_setParam` 复用同一段逻辑**，全局 CC 在哪个通道上都生效，和 MIDI 走
+进来时行为完全一致。`ch` 对全局 CC 只是提示性参数。这一条要写进 `engine_iface.h`
+的注释里，否则下一个读代码的人会"顺手清理"掉它。
+
+### 队列的真实价值：让引擎变成单写者
+
+设计文档说是"解耦"。查下来今天已经有一个隐含的耦合问题：
+MIDI 回调在改引擎参数，M2 的音序器也会在改，而两者是不同的调用源。
+把消费点收敛到 `regular_checks()` 里唯一一处，**引擎参数就只有一个写者**——
+这才是队列要解决的问题，也是它值得那几百字节 RAM 的理由。
+
+事件结构按设计文档 `struct Ev { uint8_t op, ch, a, b; }`（4 字节）。
+**消费点放在 `regular_checks()` 里 `MIDI.read()` 之后**，同一次 tick 内排空，
+这样 MIDI 来的和音序器来的事件按到达顺序处理，行为可复现。
 
 ---
 
