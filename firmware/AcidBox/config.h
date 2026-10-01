@@ -16,10 +16,19 @@
 //#define FLASH_LED               // flash built-in LED
 //#define LOLIN_RGB               // Flashes the LOLIN S3 built-in RGB-LED
 
-// M0: DEBUG_ON is back on. The bench symptom (one drum hit, then noise) has three
-// candidate causes that are indistinguishable by ear, and the author's own note is
-// that debugging "eats ticks initially belonging to real-time tasks" -- acceptable
-// while diagnosing, not for production. Turn it back off once the cause is known.
+// M0: DEBUG_ON stays on for the shipping build, which is a deliberate change from the
+// plan above. The author's warning -- that debugging "eats ticks initially belonging
+// to real-time tasks" -- was written for a tree where the audio tasks ran at priority 1
+// alongside loopTask on the same core, so serial printing genuinely competed with the
+// sequencer for the same time slice. audio_task1 and audio_task2 are now priority 5,
+// pinned to core 0 and core 1 respectively and neither one busy-spinning, so the log
+// runs from loop() at priority 1 without ever touching the audio path.
+//
+// What it buys, and it is worth more than the ticks: the boot log proves the sample
+// kit loaded and how much cache it needed, and the [WARN] line in regular_checks()
+// keeps reporting the sampler's bounds guard for the life of the unit. That guard is a
+// real fix, and a fix with no signal attached to it is a fix nobody will notice
+// breaking. Turn DEBUG_ON off once there is hardware to watch it on.
 //
 // DEBUG_SAMPLER is deliberately left off: it prints per-sample lines from
 // Sampler::Init and would drown the numbers we actually want.
@@ -68,7 +77,12 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 #endif
 
 /* M0 diagnostics */
-#define M0_DIAG 1     // the M0 diagnostic block. Set to 0 to strip it.
+#define M0_DIAG 0     // the M0 diagnostic block. Off now: it has done its job and it is
+                     // not shippable, because mode 2 writes a known-silent buffer to
+                     // the DAC for a third of every cycle. Set back to 1 to re-enable
+                     // everything below if the noise ever comes back -- the counters,
+                     // the per-bus peaks and the three test modes are all still here,
+                     // guarded by this one switch and by nothing else.
 #define M0_DIAG_MS 500   // report window in ms: peaks are measured and printed once per
                         // this many.
                         // Cycles on its own because this board (ESP32-S3-WROOM) exposes
@@ -125,6 +139,16 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
       m0ShortWrites++; \
       m0ShortBytes += (uint32_t)(sizeof(out_buf[current_out_buf]._signed) - m0w_); \
     } }
+#else
+  // With the diagnostics off, the write expands to exactly the upstream call, byte for
+  // byte, so the shipping audio path carries no trace of the investigation: no extra
+  // counter, no branch, no discarded return value. The macro stays defined because
+  // i2s_setup.ino calls it unconditionally, and the point of routing both call sites
+  // through it was that re-enabling M0_DIAG has to be a one-token change here rather
+  // than an edit inside the I2S output path.
+  #define M0_I2S_WRITE() { \
+    I2S.write((uint8_t*)out_buf[current_out_buf]._signed, \
+              sizeof(out_buf[current_out_buf]._signed)); }
 #endif
 
 float bpm = 130.0f;

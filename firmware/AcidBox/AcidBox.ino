@@ -301,25 +301,12 @@ void setup(void) {
 #ifdef DEBUG_ON 
   DEBUG_PORT.begin(115200); 
   delay(50);
-  // M0: port probe. One marker per candidate port, so a single flash settles which
-  // USB path this board actually wires, instead of the third round of guessing.
-  // Written directly rather than through DEBF/DEBUG so it does not depend on the
-  // macros below resolving to anything in particular.
-  // Marker 1 goes out of DEBUG_PORT, which is HWCDCSerial on this build, so this line
-  // does NOT prove UART0 is wired. It only proves the log port itself is alive.
-  DEBUG_PORT.println("[M0] probe: log port alive");
+  // M0: the port probe that used to live here is gone. It existed only to find out
+  // which USB path this board actually wires, and that is settled: DEBUG_PORT is
+  // HWCDCSerial and the log arrives on the USB-OTG port. Its markers printed on every
+  // boot forever to answer a question nobody asks any more.
+  DEBUG_PORT.println("[M0] log port: HWCDC (native USB) on USB-OTG");
   DEBUG_PORT.flush();
-#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
-  // Same condition HWCDC.h guards its own class definition with, so this compiles
-  // whether or not the CDC came up. Only meaningful with USBMode=hwcdc and
-  // CDCOnBoot=Enabled in the FQBN; with the core default the port never exists.
-  HWCDCSerial.begin(115200);
-  HWCDCSerial.println("[M0] probe: HWCDC (native USB) begin ok");
-  HWCDCSerial.flush();
-  delay(50);
-  HWCDCSerial.println("[M0] probe: HWCDC second line");
-  HWCDCSerial.flush();
-#endif
 #endif
 delay(200);
 
@@ -508,16 +495,21 @@ void regular_checks() {
   jukebox_tick();
 #endif
 
-  // M0: report the sampler bounds counter here rather than in Sampler::Process(),
-  // which runs in the IRAM audio task and must not print. Rate limited, and the
-  // DEBUG macros compile away entirely unless DEBUG_ON is set.
+  // M0: the sampler's play cursor ran off the end of a sample. Reported here rather
+  // than in Sampler::Process(), which runs in the IRAM audio task and must not print.
+  // Rate limited to every 2000 calls, and gated on DEBUG_ON rather than M0_DIAG: this
+  // one earns its place permanently. The guard in sampler.ino is a real fix, and this
+  // is how you find out it is firing. It was last seen at roughly one call per two
+  // seconds, which is the routine end-of-sample overshoot that fractional pitch makes
+  // and not a fault -- so it is a warning, not an error, and it should stay quiet on a
+  // healthy kit. If it goes from occasional to continuous, that is new information.
 #ifdef DEBUG_ON
   static uint32_t tick = 0;
   static uint32_t reported = 0;
   if ( ++tick >= 2000 ) {
     tick = 0;
     if ( Drums.GetOobReads() != reported ) {
-      DEBF("[M0] sampler out-of-bounds reads: %d (new since last report)\r\n",
+      DEBF("[WARN] sampler play cursor left the sample or the cache: %d (new since last report)\r\n",
            (int)(Drums.GetOobReads() - reported));
       reported = Drums.GetOobReads();
     }
