@@ -304,32 +304,52 @@ jobs:
           set -euo pipefail
           command -v python3 >/dev/null || { echo "::error::python3 missing on runner"; exit 1; }
 
-          scheme=$(sed -n 's/.*PartitionScheme=\([^,]*\).*/\1/p' <<<"$FQBN")
-          if [ -z "$scheme" ]; then
-            echo "::error::no PartitionScheme= in FQBN: $FQBN"
-            exit 1
-          fi
-
-          csv=$(find ~/.arduino15/packages/esp32/hardware/esp32 \
-                  -path "*/tools/partitions/${scheme}.csv" -print -quit)
-          if [ -z "$csv" ]; then
-            echo "::error::${scheme}.csv not found in the installed core (from FQBN: $FQBN)"
-            exit 1
-          fi
-          echo "partition scheme: $scheme"
-          echo "partition CSV: $csv"
-
           mkdir -p "${{ runner.temp }}/merged"
-          python3 - "$csv" \
+          # Everything below, including finding the partition CSV, happens in
+          # one python process. Doing it in shell meant a here-string, a sed
+          # and a find over the whole core tree -- three ways to fail for
+          # reasons that never reach the log as anything readable.
+          #
+          # It also means every diagnostic has to go to STDOUT. GitHub only
+          # turns ::error:: lines on stdout into annotations on the commit
+          # page; the same text on stderr is just "Process completed with
+          # exit code 1". sys.exit("::error::...") is stderr, so a real
+          # diagnosis used to be invisible exactly when it was needed.
+          python3 - "$FQBN" "$HOME/.arduino15/packages/esp32/hardware/esp32" \
                    "${{ runner.temp }}/build" \
                    "${{ runner.temp }}/littlefs/littlefs.bin" \
                    "${{ runner.temp }}/merged/merged.bin" > merge-report.md <<'PY'
-          import csv as _csv, hashlib, os, sys
+          import csv as _csv, glob, hashlib, os, sys
 
-          csv_path, build_dir, fs_path, out_path = sys.argv[1:5]
+          fqbn, core_root, build_dir, fs_path, out_path = sys.argv[1:6]
+
+          def die(msg):
+              # stdout on purpose: this becomes an annotation on the commit
+              # page, which is the one place the reason is readable without
+              # digging through the run log.
+              print(f"::error::{msg}")
+              sys.exit(1)
 
           def num(s):
               return int(s.strip(), 0)
+
+          # Partition scheme straight out of the FQBN -- the same string
+          # arduino-cli built with.
+          scheme = ""
+          for field in fqbn.split(","):
+              if field.startswith("PartitionScheme="):
+                  scheme = field.split("=", 1)[1]
+          if not scheme:
+              die(f"no PartitionScheme= in FQBN: {fqbn}")
+
+          hits = glob.glob(os.path.join(core_root, "*", "tools", "partitions",
+                                        f"{scheme}.csv"))
+          if not hits:
+              die(f"{scheme}.csv not found under {core_root}; looked in "
+                  f"{os.path.join(core_root, '*', 'tools', 'partitions')}")
+          csv_path = hits[0]
+          print(f"partition scheme: {scheme}")
+          print(f"partition CSV: {csv_path}")
 
           parts = []
           with open(csv_path, newline="") as fh:
@@ -346,7 +366,9 @@ jobs:
                   try:
                       parts.append((name.strip(), num(off), num(size)))
                   except ValueError:
-                      sys.exit(f"::error::cannot parse partition row {row!r} in {csv_path}")
+                      die(f"cannot parse partition row {row!r} in {csv_path}")
+          if not parts:
+              die(f"no partitions parsed from {csv_path}")
 
           # The partition table itself lives at the fixed 0x8000 and is not a
           # row in the CSV; the bootloader fills everything below it.
@@ -354,12 +376,12 @@ jobs:
           need = ("otadata", "app0")
           for n in need:
               if n not in by_name:
-                  sys.exit(f"::error::partition {n!r} missing from {csv_path}")
+                  die(f"partition {n!r} missing from {csv_path}")
 
           app_off, app_size = by_name["app0"][1], by_name["app0"][2]
           fs_name = os.environ["FS_PARTITION_LABEL"]
           if fs_name not in by_name:
-              sys.exit(f"::error::no partition labelled {fs_name!r} in {csv_path}")
+              die(f"no partition labelled {fs_name!r} in {csv_path}")
           fs_off, fs_size = by_name[fs_name][1], by_name[fs_name][2]
           ota_off = by_name["otadata"][1]
           total = max(o + s for _n, o, s in parts)
@@ -381,11 +403,11 @@ jobs:
           for name, off in pieces:
               p = path_of(name)
               if not os.path.exists(p):
-                  sys.exit(f"::error::{name} missing at {p}")
+                  die(f"{name} missing at {p}")
               with open(p, "rb") as fh:
                   data = fh.read()
               if off + len(data) > total:
-                  sys.exit(f"::error::{name} at 0x{off:x} + {len(data)} runs past 0x{total:x}")
+                  die(f"{name} at 0x{off:x} + {len(data)} runs past 0x{total:x}")
               buf[off:off + len(data)] = data
               print(f"| {name} | 0x{off:x} | {len(data)} | "
                     f"{hashlib.sha256(data).hexdigest()[:16]} |")
@@ -396,7 +418,7 @@ jobs:
           for name, limit in (("firmware.bin", app_size), ("littlefs.bin", fs_size)):
               used = os.path.getsize(path_of(name))
               if used > limit:
-                  sys.exit(f"::error::{name} is {used} bytes, only {limit} available")
+                  die(f"{name} is {used} bytes, only {limit} available")
 
           with open(out_path, "wb") as fh:
               fh.write(buf)
@@ -407,12 +429,12 @@ jobs:
           with open(out_path, "rb") as fh:
               check = fh.read()
           if len(check) != total:
-              sys.exit(f"::error::merged image is {len(check)} bytes, expected {total}")
+              die(f"merged image is {len(check)} bytes, expected {total}")
           for name, off in pieces:
               with open(path_of(name), "rb") as fh:
                   data = fh.read()
               if check[off:off + len(data)] != data:
-                  sys.exit(f"::error::verify failed: {name} != merged[0x{off:x}:]")
+                  die(f"verify failed: {name} != merged[0x{off:x}:]")
 
           print(f"| **merged.bin** | **0x0** | **{total}** | "
                 f"**{hashlib.sha256(check).hexdigest()[:16]}** |")

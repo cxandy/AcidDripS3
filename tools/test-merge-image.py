@@ -55,13 +55,20 @@ FILL = {
     "littlefs.bin": 0x2E0000,    # full partition, as mklittlefs pads it
 }
 
+FQBN = "esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M"
 
-def build_case(tmp, sizes=None, label="", expect_fail_sub=None):
+
+def build_case(tmp, sizes=None, label="", expect_fail_sub=None, fqbn=FQBN,
+               csv_text=None):
     sizes = sizes or FILL
     d = pathlib.Path(tmp)
     build = d / "build"
+    # The script globs <core_root>/*/tools/partitions/<scheme>.csv, so mirror
+    # the installed core's layout rather than handing it a flat path.
+    pdir = d / "core" / "3.3.12" / "tools" / "partitions"
+    pdir.mkdir(parents=True, exist_ok=True)
     build.mkdir(parents=True, exist_ok=True)
-    (d / "noota_3g.csv").write_text(CSV, encoding="utf-8")
+    (pdir / "noota_3g.csv").write_text(csv_text or CSV, encoding="utf-8")
     for name, size in sizes.items():
         if name == "littlefs.bin":
             (d / name).write_bytes(bytes(range(256)) * (size // 256) + b"\x00" * (size % 256))
@@ -70,7 +77,7 @@ def build_case(tmp, sizes=None, label="", expect_fail_sub=None):
     env = dict(os.environ, FS_PARTITION_LABEL="spiffs")
     r = subprocess.run(
         [sys.executable, str(script_path),
-         str(d / "noota_3g.csv"), str(build), str(d / "littlefs.bin"),
+         fqbn, str(d / "core"), str(build), str(d / "littlefs.bin"),
          str(d / "merged.bin")],
         capture_output=True, text=True, env=env,
     )
@@ -80,10 +87,11 @@ def build_case(tmp, sizes=None, label="", expect_fail_sub=None):
         ok = r.returncode == 0
         why = ""
     else:
-        # Must fail, and must fail for THIS reason -- a crash that happens to
-        # return non-zero would otherwise count as a pass.
-        ok = r.returncode != 0 and expect_fail_sub in out
-        why = f" (wanted {expect_fail_sub!r} in the message)"
+        # Must fail, and must fail for THIS reason, with the reason on stdout
+        # so GitHub renders it as an annotation rather than a bare exit code.
+        ok = (r.returncode != 0 and expect_fail_sub in r.stdout
+              and "::error::" in r.stdout)
+        why = f" (wanted ::error:: {expect_fail_sub!r} on stdout)"
     print(f"\n=== {label} -> rc={r.returncode} ({'PASS' if ok else 'FAIL'}){why} ===")
     print(out[-1400:] if out else "(no output)")
 
@@ -122,6 +130,18 @@ del miss["boot_app0.bin"]
 results.append(build_case(tempfile.mkdtemp(), sizes=miss,
                           label="boot_app0.bin missing",
                           expect_fail_sub="boot_app0.bin missing"))
+results.append(build_case(tempfile.mkdtemp(),
+                          label="FQBN with no PartitionScheme",
+                          fqbn="esp32:esp32:esp32s3:PSRAM=opi",
+                          expect_fail_sub="no PartitionScheme= in FQBN"))
+results.append(build_case(tempfile.mkdtemp(),
+                          label="scheme CSV absent from the core",
+                          fqbn="esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=nosuchscheme",
+                          expect_fail_sub="nosuchscheme.csv not found"))
+results.append(build_case(tempfile.mkdtemp(),
+                          label="FS_PARTITION_LABEL not in the CSV",
+                          csv_text=CSV.replace("spiffs", "littlefs"),
+                          expect_fail_sub="no partition labelled"))
 
 print("\n" + ("ALL PASS" if all(results) else "SOME FAILED"))
 sys.exit(0 if all(results) else 1)
