@@ -73,7 +73,12 @@ env:
   #                      wrong fails silently -- it compiles, it just cannot
   #                      hold the 2.5 MB of drum kits.
   #   FlashSize=16M      Flash size of the target board. Raise if yours differs.
-  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
+  # Partition scheme, named once. The merged-image step parses this CSV to
+  # derive every flash offset, so hardcoding noota_3g a second time inside
+  # the FQBN would give the two a chance to disagree.
+  PARTITION_SCHEME: noota_3g
+
+  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=${{ env.PARTITION_SCHEME }},FlashSize=16M
 
 jobs:
   build:
@@ -271,6 +276,161 @@ jobs:
           echo "FS_CONTENT_RAW=$raw"     >> "$GITHUB_ENV"
           echo "FS_CONTENT_BLOCKS=$blocks" >> "$GITHUB_ENV"
           echo "FS_FILE_COUNT=$n"         >> "$GITHUB_ENV"
+
+      - name: Merge everything into one flashable image
+        if: success()
+        run: |
+          # Five files at five addresses is a five-row table in a browser
+          # flasher, and every row is a chance to typo an address. But
+          # noota_3g lays flash out as one unbroken span:
+          #
+          #   bootloader  0x0       0x8000
+          #   partitions  0x8000    0x9000
+          #   nvs         0x9000    0xe000
+          #   otadata     0xe000    0x10000
+          #   app0        0x10000   0x110000
+          #   spiffs      0x110000  0x3F0000
+          #   coredump    0x3F0000  0x400000
+          #
+          # Nothing is imported between 0x0 and the end of coredump, so the
+          # whole thing collapses into a single 4 MiB image flashed at 0x0.
+          # One download, one row, one button.
+          #
+          # Offsets are parsed out of the core's own partition CSV rather
+          # than written here. The 0xe000 vs 0xe0000 trap is exactly the
+          # kind of thing that goes stale silently when it lives in a
+          # comment; if the partition scheme ever changes, this follows.
+          set -euo pipefail
+          command -v python3 >/dev/null || { echo "::error::python3 missing on runner"; exit 1; }
+
+          csv=$(find ~/.arduino15/packages/esp32/hardware/esp32 \
+                  -path "*/tools/partitions/${PARTITION_SCHEME}.csv" -print -quit)
+          if [ -z "$csv" ]; then
+            echo "::error::${PARTITION_SCHEME}.csv not found in the installed core"
+            exit 1
+          fi
+          echo "partition CSV: $csv"
+
+          mkdir -p "${{ runner.temp }}/merged"
+          python3 - "$csv" \
+                   "${{ runner.temp }}/build" \
+                   "${{ runner.temp }}/littlefs/littlefs.bin" \
+                   "${{ runner.temp }}/merged/merged.bin" > merge-report.md <<'PY'
+          import csv as _csv, hashlib, os, sys
+
+          csv_path, build_dir, fs_path, out_path = sys.argv[1:5]
+
+          def num(s):
+              return int(s.strip(), 0)
+
+          parts = []
+          with open(csv_path, newline="") as fh:
+              for row in _csv.reader(fh):
+                  # Skip the "# Name, Type, ..." header and blank lines.
+                  # Filter whole rows, never individual cells: dropping the
+                  # '#' cell would silently leave 'Type' as the name and
+                  # 'Size' as the offset.
+                  if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
+                      continue
+                  if len(row) < 5:
+                      continue
+                  name, _type, _sub, off, size = (row + [""] * 5)[:5]
+                  try:
+                      parts.append((name.strip(), num(off), num(size)))
+                  except ValueError:
+                      sys.exit(f"::error::cannot parse partition row {row!r} in {csv_path}")
+
+          # The partition table itself lives at the fixed 0x8000 and is not a
+          # row in the CSV; the bootloader fills everything below it.
+          by_name = {p[0]: p for p in parts}
+          need = ("otadata", "app0")
+          for n in need:
+              if n not in by_name:
+                  sys.exit(f"::error::partition {n!r} missing from {csv_path}")
+
+          app_off, app_size = by_name["app0"][1], by_name["app0"][2]
+          fs_name = os.environ["FS_PARTITION_LABEL"]
+          if fs_name not in by_name:
+              sys.exit(f"::error::no partition labelled {fs_name!r} in {csv_path}")
+          fs_off, fs_size = by_name[fs_name][1], by_name[fs_name][2]
+          ota_off = by_name["otadata"][1]
+          total = max(o + s for _n, o, s in parts)
+
+          def path_of(name):
+              return fs_path if name == "littlefs.bin" else os.path.join(build_dir, name)
+
+          pieces = [
+              ("bootloader.bin", 0x0),
+              ("partitions.bin", 0x8000),
+              ("boot_app0.bin",  ota_off),
+              ("firmware.bin",   app_off),
+              ("littlefs.bin",   fs_off),
+          ]
+
+          buf = bytearray(b"\xff" * total)
+          print("| file | address | bytes | sha256 (first 16) |")
+          print("|---|---|---|---|")
+          for name, off in pieces:
+              p = path_of(name)
+              if not os.path.exists(p):
+                  sys.exit(f"::error::{name} missing at {p}")
+              with open(p, "rb") as fh:
+                  data = fh.read()
+              if off + len(data) > total:
+                  sys.exit(f"::error::{name} at 0x{off:x} + {len(data)} runs past 0x{total:x}")
+              buf[off:off + len(data)] = data
+              print(f"| {name} | 0x{off:x} | {len(data)} | "
+                    f"{hashlib.sha256(data).hexdigest()[:16]} |")
+
+          # The app and the filesystem have hard limits. Overrunning either is
+          # silent corruption in a merged image -- the neighbouring partition
+          # just gets eaten -- so refuse instead of writing it.
+          for name, limit in (("firmware.bin", app_size), ("littlefs.bin", fs_size)):
+              used = os.path.getsize(path_of(name))
+              if used > limit:
+                  sys.exit(f"::error::{name} is {used} bytes, only {limit} available")
+
+          with open(out_path, "wb") as fh:
+              fh.write(buf)
+
+          # Read the merged image back and prove every byte landed where the
+          # CSV says it should. A merge bug that ships is far worse than a
+          # merge bug that fails here.
+          with open(out_path, "rb") as fh:
+              check = fh.read()
+          if len(check) != total:
+              sys.exit(f"::error::merged image is {len(check)} bytes, expected {total}")
+          for name, off in pieces:
+              with open(path_of(name), "rb") as fh:
+                  data = fh.read()
+              if check[off:off + len(data)] != data:
+                  sys.exit(f"::error::verify failed: {name} != merged[0x{off:x}:]")
+
+          print(f"| **merged.bin** | **0x0** | **{total}** | "
+                f"**{hashlib.sha256(check).hexdigest()[:16]}** |")
+          print()
+          print(f"Flash this ONE file at 0x0. It covers 0x0-0x{total:x}, which is")
+          print(f"every partition in {os.path.basename(csv_path)}. Padding between")
+          print("partitions is 0xFF, i.e. erased flash.")
+          PY
+
+          cat merge-report.md
+          {
+            echo "### One-file flash image"
+            echo
+            cat merge-report.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          ls -l "${{ runner.temp }}/merged/merged.bin"
+          cp merge-report.md "${{ runner.temp }}/merged/README.md"
+
+      - name: Upload merged image
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: AcidDripS3-merged
+          path: ${{ runner.temp }}/merged/*
+          if-no-files-found: error
 
       - name: Upload firmware binary
         if: success()

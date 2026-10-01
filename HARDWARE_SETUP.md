@@ -172,15 +172,16 @@ GND              ──►  GND
 
 ### 5.2 拿产物
 
-从 GitHub Actions 最近一次 green 里下 **两个** artifact：
+从 GitHub Actions 最近一次 green 里下 **一个** artifact：
 
-| artifact | 内容 |
-|---|---|
-| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`firmware.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` |
-| `AcidDripS3-littlefs` | `littlefs.bin`（鼓组音色，见 §6） |
+| artifact | 内容 | 什么时候用 |
+|---|---|---|
+| **`AcidDripS3-merged`** | **`merged.bin`（4 MiB，一个文件）+ `README.md`** | **平时就用它，见 §5.5** |
+| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`firmware.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` | 要单独重刷某一块，或想在命令行里刷 |
+| `AcidDripS3-littlefs` | `littlefs.bin`（鼓组音色原始镜像，见 §6） | 同上 |
 
 `--export-binaries` 会把三个 `.bin` 放进构建目录；`boot_app0.bin` 来自 core 内部的
-`tools/partitions/`，CI 里的 *Assemble the flash bundle* 步骤负责把它复制进来。
+`tools/partitions/`，CI 里的*Assemble the flash bundle* 步骤负责把它复制进来。
 四个偏移量也由那一步写进 `flash-args.txt`，**不用照抄任何网上的教程**（包括本文档）。
 
 不想装 esptool 就走 §5.5 的浏览器烧写。
@@ -229,28 +230,88 @@ M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个
 
 ### 5.5 完全不装软件：浏览器烧写
 
-**web.esphome.io 刷不了 `littlefs.bin`，一个字节都刷不进去。用 ESP Web Tools。**
+**只下一个文件：`AcidDripS3-merged` 里的 `merged.bin`，地址填 `0x0`。**
 
-|  | web.esphome.io | espressif.github.io/esptool-js |
+CI 把 bootloader、分区表、otadata、app、LittleFS 鼓组按 `noota_3g` 的实际布局
+拼成**一个 4 MiB 的镜像**了。原因是这个分区表在 `0x0` 到 `0x400000` 之间
+**完全连续，中间没有任何空洞**：
+
+```
+bootloader  0x000000
+partitions  0x008000
+nvs         0x009000
+otadata     0x00E000
+app0        0x010000    }  4,194,304 字节 = 4 MiB
+spiffs      0x110000    }  ← 鼓组就在这里
+coredump    0x3F0000
+```
+
+所以五行表格可以塌成一行：一次下载、一个地址、一次点击。
+缝隙全部填 `0xFF`，也就是"已擦除"的 flash 状态，和刚出厂一样。
+
+偏移量不是写死在 CI 里的，是**从 core 自己的 `noota_3g.csv` 解析出来的**
+（`PARTITION_SCHEME` 这个环境变量同时喂给 FQBN，两边不会打架）。
+换分区方案它会自己跟着变——`0xe000` / `0xe0000` 那种坑就是这么躲掉的。
+
+| Flash Address | File |
+|---|---|
+| `0x0` | `merged.bin` |
+
+**步骤：**
+
+1. Chrome 或 Edge 打开<https://espressif.github.io/esptool-js/>（Safari 不支持）
+2. 按住 `BOOT` → 点 `RST` → 松开 `BOOT`
+3. Baudrate 选 `921600` → 点 **Connect** → 确认认出 `ESP32-S3`
+4. Flash Mode **keep** / Flash Freq **keep** / Flash Size **keep**
+5. **Add File** 加一行：`0x0` + `merged.bin`
+6. 点 **Program**（4 MiB 在 921600 下大概半分钟）
+
+三个 Flash 选项都选 **keep**：arduino-cli 编译时已经按 `FlashSize=16M` 把
+flash size / mode / freq 写进镜像头里了，工具再改一遍只会引入偏差。
+
+> 想核对下载的东西：`AcidDripS3-merged` 里还有 `README.md`，
+> 上面有五个分块的地址、大小和 sha256 前 16 位，可以逐个对。
+>
+> ```
+> Get-FileHash merged.bin -Algorithm SHA256
+> ```
+
+<details>
+<summary>原来的五行分刷（只在需要单独重刷某一块时用）</summary>
+
+| Flash Address | File | 来自 |
 |---|---|---|
-| 出品方 | ESPHome | Espressif 官方（`esptool` 的 WebAssembly 版） |
-| 定位 | **ESPHome 设备向导**：写 YAML → 交给它的构建服务器编译 → 刷它编出来的固件 | 通用刷写器 |
-| 文件槽位 | 只有"一个固件"，没有自选文件/自选地址的界面 | **任意多个，每个自己填地址** |
-| 能刷 `littlefs.bin` | **不能** | 能 |
-| 浏览器 | Chrome / Edge / Firefox 151+ | Chrome / Edge（Safari 不支持） |
+| `0x0` | `bootloader.bin` | `AcidDripS3-firmware` |
+| `0x8000` | `partitions.bin` | `AcidDripS3-firmware` |
+| `0xe000` | `boot_app0.bin` | `AcidDripS3-firmware` |
+| `0x10000` | `firmware.bin` | `AcidDripS3-firmware` |
+| `0x110000` | `littlefs.bin` | `AcidDripS3-littlefs` |
 
-这是对着它发布出去的 `app.*.js` 数的，不是猜的：`littlefs`、`spiffs`、
-`write_flash`、`boot_app0`、`0x8000`、`0xe000` 在整个 bundle 里**出现次数全是 0**。
-它内部传给烧录引擎的确实是一个 `{address, data}` 数组，但产品界面上没有任何地方
-让你往里放自己的文件——只放它自己编出来的那一个固件。
+命令行版本见 §5.4 的 `flash-args.txt` 和 §6 的第二条命令。
+**分刷时 LittleFS 那一次要么和固件同一次刷完，要么一次都别刷**——
+只刷固件就上电，鼓组会被自动格式化掉（`FORMAT_LITTLEFS_IF_FAILED true`），
+出来的是 8-bit fallback，还很容易误判成"刷成功了"。
+`merged.bin` 根本没有这个坑，这也是它存在的理由。
 
-所以走 web.esphome.io 的实际后果是：鼓组鼓包还是得用 esptool 烧，
+</details>
+
+<details>
+<summary>为什么不用 web.esphome.io</summary>
+
+它是 **ESPHome 设备向导**：写 YAML → 交给它的构建服务器编译 → 刷它编出来的**那一个**固件。
+对着它发布的 `app.*.js` 数关键字：`littlefs`、`spiffs`、`write_flash`、
+`boot_app0`、`0x8000`、`0xe000` 出现次数**全是 0**。
+它内部传给烧录引擎的确实是个 `{address, data}` 数组，但界面上没有任何地方
+让你往里放自己的文件。
+
+所以它**刷不了 `littlefs.bin`**，鼓组还是得用 esptool 烧，
 变成"浏览器刷固件 + 命令行刷鼓组"两套流程，还得保证两边是同一次 CI 的产物。
-用 ESP Web Tools 一次做完，五个地址自己填，和 `flash-args.txt` 一一对应。
 
-> 顺带：它的 bundle 里有一处按 `VID 0x303A / PID 0x1001`、`0x1002` 识别芯片，
-> 也就是**明确支持 S3 原生 USB 的 ROM 下载模式**——所以"原生 USB 口能不能刷"
-> 这件事本身没问题，问题只在它不给你放文件系统镜像的地方。
+（顺带：它的 bundle 里有按 `VID 0x303A / PID 0x1001`、`0x1002` 识别芯片的代码，
+也就是**明确支持 S3 原生 USB 的 ROM 下载模式**——所以"原生 USB 能不能刷"本身没问题，
+问题只在它没有放文件系统镜像的地方。）
+
+</details>
 
 **关键：必须插原生 USB 口（USB OTG，GPIO19/20），不能插 UART 桥。**
 
@@ -263,43 +324,14 @@ CH340 / CP2102 / FTDI 这类桥片芯片 Chrome 的 Web Serial **认不出来**�
 原生 USB 口在 S3 上是**固定功能**的 USB-Serial-JTAG 外设，GPIO19/20，
 和固件无关。所以按住 BOOT 进 ROM 下载模式时它一定会枚举出来。
 
-**步骤（ESP Web Tools）：**
-
-1. Chrome 或 Edge 打开 <https://espressif.github.io/esptool-js/>（Safari 不支持）
-2. 按住 `BOOT` → 点 `RST` → 松开 `BOOT`
-3. Baudrate 选 `921600` → 点 **Connect** → 确认认出 `ESP32-S3`
-4. Flash Mode **keep** / Flash Freq **keep** / Flash Size **keep**
-5. 点 **Add File** 加满五行：
-
-| Flash Address | File | 来自 |
-|---|---|---|
-| `0x0` | `bootloader.bin` | `AcidDripS3-firmware` |
-| `0x8000` | `partitions.bin` | `AcidDripS3-firmware` |
-| `0xe000` | `boot_app0.bin` | `AcidDripS3-firmware` |
-| `0x10000` | `firmware.bin` | `AcidDripS3-firmware` |
-| `0x110000` | `littlefs.bin` | `AcidDripS3-littlefs` |
-
-6. 点 **Program**
-
-**五行必须一次性全填上再点 Program。** LittleFS 那一行不能省、也不能事后补刷：
-`FORMAT_LITTLEFS_IF_FAILED true` 会在挂不上时自动格式化，
-只刷固件就上电 → 鼓组变 8-bit fallback，还很容易误判成"刷成功了"。
-
-三个 Flash 选项都选 **keep**：arduino-cli 编译时已经按 `FlashSize=16M` 把
-flash size / mode / freq 写进镜像头里了，工具再改一遍只会引入偏差。
-
 **其他注意：**
 
 - **别点 `Erase Flash`。** 不需要，而且点完再只刷一部分，就把前面写的擦了。
 - 刷完之后原生 USB 口变成 **TinyUSB MIDI 设备**（`AcidBox S3`），不再是串口。
   要再刷就重新 BOOT+RST 进下载模式——正常现象，不是坏了。
-- 想核对下载的东西对不对，artifact 里有 `SHA256SUMS.txt`：
-
-  ```powershell
-  Get-FileHash firmware.bin -Algorithm SHA256
-  ```
-
----
+- CI 里那一步会把拼出来的镜像**读回来逐字节比对**每个分块的偏移；
+  固件超过 1 MB 或 LittleFS 装不下会直接让 build 变红，
+  而不是产出一个"看着能刷"的镜像。
 
 ## 6. LittleFS 鼓组音色
 
@@ -351,7 +383,8 @@ AcidDripS3-littlefs / littlefs.bin
 ```
 
 用 core 自带的 `esptool` 烧（core 里 `tools/flasher.py` 的等价物），偏移是分区表里的 `0x110000`。
-**推荐直接走 §5.5，把这一行和固件那四行一起在浏览器里刷掉**：
+**不过平时直接走 §5.5 刷 `merged.bin` 就够了**——鼓组已经在里面了，
+不用管这一条命令：
 
 ```powershell
 python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
