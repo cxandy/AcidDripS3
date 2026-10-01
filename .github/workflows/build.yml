@@ -61,18 +61,27 @@ jobs:
         # the key, which is the case that genuinely needs a fresh install.
         uses: actions/cache@v5
         with:
+          # ~/.arduino15 holds packages/, staging/ and the library index -- the
+          # whole ~1.5 GB toolchain. The arduino-cli binary itself is only a few
+          # MB and is reinstalled each run, which keeps a version bump from
+          # needing a cache invalidation.
           path: |
             ~/.arduino15
             ~/Arduino
-            /usr/local/lib/arduino-cli
           key: arduino-${{ env.ESP32_CORE_VERSION }}-${{ env.MIDI_LIB_VERSION }}
           restore-keys: |
             arduino-${{ env.ESP32_CORE_VERSION }}-
 
       - name: Install arduino-cli
         run: |
+          # The tarball holds a bare `arduino-cli` at its root. Extracting to
+          # /usr/local drops it in /usr/local/arduino-cli, which is not on PATH
+          # -- so link it into bin explicitly rather than assuming.
+          tmp=$(mktemp -d)
           curl -fsSL "https://downloads.arduino.cc/arduino-cli/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz" \
-            | sudo tar -xz -C /usr/local
+            | tar -xz -C "$tmp"
+          sudo install -m 0755 "$tmp/arduino-cli" /usr/local/bin/arduino-cli
+          rm -rf "$tmp"
           arduino-cli version
 
       - name: Install ESP32 core
