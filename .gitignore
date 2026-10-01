@@ -1,0 +1,35 @@
+# ── Upstream clones: tracked as reference only, never vendored ──
+# AcidBox is MIT (c) 2022 copych — fetched via:
+#   git clone --depth 1 --branch S3-regular https://github.com/copych/AcidBox.git
+# Acid_Drip has NO upstream license — fetched via:
+#   git clone https://github.com/lonesoulsurfer/Acid_Drip_Bassline_and_Drum_Synth.git
+# Neither is redistributed in this repository. See UPSTREAM.md.
+/AcidBox/
+/Acid_Drip_Bassline_and_Drum_Synth/
+
+# ── Arduino build output ──
+build/
+*.elf
+*.bin
+*.map
+*.hex
+
+# ── LittleFS image (built from AcidBox data/, uploaded via esp32-littlefs-upload) ──
+littlefs.bin
+
+# ── Tooling scratch ──
+.openchamber/
+
+# ── Editor / OS ──
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ── Secrets ──
+*.pem
+*.key
+!*.pub
