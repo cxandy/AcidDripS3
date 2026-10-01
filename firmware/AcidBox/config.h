@@ -68,13 +68,14 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 #endif
 
 /* M0 diagnostics */
-#define M0_REVERB_TOGGLE_PIN 23 // Momentarily short this pin to GND to bypass the reverb.
-                                // Safe to use: AcidBanger.ino read_button() forces the
-                                // history to 0 for every button except numb==5 (GPIO0),
-                                // so the jukebox provably ignores pin 23 and start/stop
-                                // on the BOOT button keeps working. init_button() already
-                                // leaves it as INPUT_PULLUP.
-#define M0_DIAG 1               // the M0 diagnostic block below. Set to 0 to strip it.
+#define M0_DIAG 1     // the M0 diagnostic block. Set to 0 to strip it.
+#define M0_DIAG_MS 3000  // report window: peaks are measured, printed and the reverb
+                        // bypass flipped once per this many milliseconds. Short enough
+                        // to A/B by ear, long enough to read. Alternates automatically
+                        // because this board (ESP32-S3-WROOM) exposes no spare pin:
+                        // GPIO23 exists on the chip and init_button() puts it in
+                        // INPUT_PULLUP, but on this board it reads LOW with nothing
+                        // attached and is not broken out, so it cannot be a switch.
 
 float bpm = 130.0f;
 

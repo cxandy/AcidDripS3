@@ -91,10 +91,31 @@ static  float     param[POT_NUM];
 static int    ctrl_hold_notes;
 
 #if M0_DIAG
-// M0: reverb bypass, toggled from regular_checks() on M0_REVERB_TOGGLE_PIN. Written on
-// core 1, read on core 0 from the IRAM audio task, hence volatile. A bool is a single
-// word load, so there is no tearing to worry about.
+// M0: reverb bypass, flipped on a timer from regular_checks(). Written on core 1, read
+// on core 0 from the IRAM audio task, hence volatile. A bool is a single word load, so
+// there is no tearing to worry about.
+//
+// It alternates on its own rather than waiting for a button: the M0 wiring is a DAC
+// cable and nothing else, and this WROOM board breaks out no spare pin to switch on.
 static volatile bool m0ReverbBypass = false;
+
+// Peak amplitude of each bus in mixer(), read and printed from regular_checks().
+// Written from the IRAM audio task, so plain stores only: no printing, and no libm
+// either -- M0_TRACK below does its own abs with a compare, because fabsf() is not
+// guaranteed to be in IRAM.
+volatile float m0pk_drums  = 0.0f;
+volatile float m0pk_synth1 = 0.0f;
+volatile float m0pk_synth2 = 0.0f;
+volatile float m0pk_delay  = 0.0f;
+volatile float m0pk_reverb = 0.0f;
+volatile float m0pk_out    = 0.0f;
+volatile uint32_t m0Bad     = 0;   // NaN or Inf samples seen on the final mix
+
+// a > pk   is false for NaN, so a NaN never raises the peak; the second test is
+// written as !(a < 1e9f) precisely because it is true for NaN and for Inf.
+#define M0_TRACK(pk, v) { float m0a_ = ((v) < 0.0f) ? -(v) : (v); \
+                          if (m0a_ > (pk)) (pk) = m0a_;             \
+                          if (!(m0a_ < 1e9f)) m0Bad++; }
 #endif
 
 // Audio buffers of all kinds
@@ -261,7 +282,9 @@ void setup(void) {
   // USB path this board actually wires, instead of the third round of guessing.
   // Written directly rather than through DEBF/DEBUG so it does not depend on the
   // macros below resolving to anything in particular.
-  DEBUG_PORT.println("[M0] probe: UART0 (Serial0) begin ok");
+  // Marker 1 goes out of DEBUG_PORT, which is HWCDCSerial on this build, so this line
+  // does NOT prove UART0 is wired. It only proves the log port itself is alive.
+  DEBUG_PORT.println("[M0] probe: log port alive");
   DEBUG_PORT.flush();
 #if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
   // Same condition HWCDC.h guards its own class definition with, so this compiles
@@ -460,15 +483,30 @@ void regular_checks() {
 #endif
 
 #if M0_DIAG
-  // Momentary short of M0_REVERB_TOGGLE_PIN flips the reverb bypass, so the symptom
-  // can be A/B'd on the bench instead of costing a rebuild per comparison.
-  static uint8_t pinLast = HIGH;
-  uint8_t pinNow = digitalRead( M0_REVERB_TOGGLE_PIN );
-  if ( ( pinNow == LOW ) && ( pinLast == HIGH ) ) {
+  // M0: report the measured peaks, then flip the reverb bypass for the next window.
+  //
+  // This alternates on a timer instead of waiting for a button because the M0 wiring
+  // is a DAC cable and USB only. An earlier attempt switched on a momentary short of
+  // GPIO23; on this WROOM board that pin is not broken out and reads LOW regardless,
+  // so the bypass was stuck ON from the first loop and the experiment never ran.
+  //
+  // Two consecutive lines, one with bypass OFF and one with it ON, compare the reverb
+  // row and the out row directly: that settles whether the reverb is the noise without
+  // anyone having to judge loudness by ear.
+  static uint32_t m0LastReport = 0;
+  uint32_t m0NowMs = millis();
+  if ( (uint32_t)(m0NowMs - m0LastReport) >= (uint32_t)M0_DIAG_MS ) {
+    m0LastReport = m0NowMs;
+    DEBF("[M0] peak bypass=%s drums=%.4f synth1=%.4f synth2=%.4f delay=%.4f reverb=%.4f out=%.4f bad=%d\r\n",
+         m0ReverbBypass ? "ON" : "OFF",
+         (double)m0pk_drums, (double)m0pk_synth1, (double)m0pk_synth2,
+         (double)m0pk_delay, (double)m0pk_reverb, (double)m0pk_out,
+         (int)m0Bad);
     m0ReverbBypass = !m0ReverbBypass;
-    DEBF("[M0] reverb bypass %s\r\n", m0ReverbBypass ? "ON" : "OFF");
+    m0pk_drums = 0.0f;  m0pk_synth1 = 0.0f;  m0pk_synth2 = 0.0f;
+    m0pk_delay = 0.0f;  m0pk_reverb = 0.0f;  m0pk_out = 0.0f;
+    m0Bad = 0;
   }
-  pinLast = pinNow;
 #endif
 
 }
@@ -542,6 +580,18 @@ void IRAM_ATTR mixer() { // sum buffers
 #else
       mix_buf_l[current_out_buf][i] = (synth1_out_l + synth2_out_l + drums_out_l + dly_l);
       mix_buf_r[current_out_buf][i] = (synth1_out_r + synth2_out_r + drums_out_r + dly_r);
+#endif
+#if M0_DIAG
+      // M0: measure which bus is actually loud, instead of guessing by ear. Left
+      // channel is representative -- the right differs only by pan. m0Bad counts NaN
+      // and Inf on the final mix, which is what a numerical blow-up looks like and is
+      // a candidate explanation for noise that never stops.
+      M0_TRACK(m0pk_drums,  drums_out_l);
+      M0_TRACK(m0pk_synth1, synth1_out_l);
+      M0_TRACK(m0pk_synth2, synth2_out_l);
+      M0_TRACK(m0pk_delay,  dly_l);
+      M0_TRACK(m0pk_reverb, rvb_l);
+      M0_TRACK(m0pk_out,    mix_buf_l[current_out_buf][i]);
 #endif
       mono_mix = 0.5f * (mix_buf_l[current_out_buf][i] + mix_buf_r[current_out_buf][i]);
   //    Comp.Process(mono_mix);     // calculate gain based on a mono mix
