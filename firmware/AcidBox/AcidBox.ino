@@ -102,6 +102,11 @@ volatile uint8_t  m0Mode = 0;
 volatile uint32_t m0MixerCalls = 0;
 volatile uint32_t m0NoteOn[2]  = { 0, 0 };
 volatile uint32_t m0NoteOff[2] = { 0, 0 };
+volatile uint32_t m0ShortWrites = 0;
+volatile uint32_t m0ShortBytes = 0;
+volatile uint32_t m0I2SCalls   = 0;
+volatile uint32_t m0OobSample  = 0;
+volatile uint32_t m0OobCache   = 0;
 
 // Peak amplitude of each bus in mixer(), read and printed from regular_checks().
 // Written from the IRAM audio task, so plain stores only: no printing, and no libm
@@ -537,18 +542,28 @@ void regular_checks() {
   // had produced a sample. Every bus duly read 0.0000, which measured the pre-roll
   // rather than the fault. Start the clock here so the first window is a real one.
   static uint32_t m0LastReport = 0;
+  static uint32_t m0LastMode   = 0;
   static bool     m0Clocked = false;
   static bool     m0Legend = false;
   uint32_t m0NowMs = millis();
-  if ( !m0Clocked ) { m0LastReport = m0NowMs; m0Clocked = true; }
+  if ( !m0Clocked ) { m0LastReport = m0NowMs; m0LastMode = m0NowMs; m0Clocked = true; }
   else if ( (uint32_t)(m0NowMs - m0LastReport) >= (uint32_t)M0_DIAG_MS ) {
     m0LastReport = m0NowMs;
+    // The mode advances on its own, slower clock than the report. Mode 2 writes a
+    // known-silent buffer and whether the amplifier is still noisy with it is the one
+    // question no log can answer, so it needs three seconds of ear time rather than
+    // half a second of log time.
+    if ( (uint32_t)(m0NowMs - m0LastMode) >= (uint32_t)M0_DIAG_MODE_MS ) {
+      m0LastMode = m0NowMs;
+      m0Mode = (uint8_t)((m0Mode + 1u) % 3u);
+      m0ReverbBypass = (m0Mode == 1);
+    }
     // Say what the modes mean once, then never again. A log that arrives without the
     // operator having read a commit message should still be readable on its own.
     if ( !m0Legend ) {
       m0Legend = true;
-      DEBF("[M0] modes cycle every %d ms: 0=normal 1=reverb bypassed 2=out_buf forced to 0\r\n",
-           (int)M0_DIAG_MS);
+      DEBF("[M0] mode holds %d ms, reported every %d ms: 0=normal 1=reverb bypassed 2=out_buf forced to 0 (DAC should be SILENT)\r\n",
+           (int)M0_DIAG_MODE_MS, (int)M0_DIAG_MS);
     }
     // m0Loops first: a rising count proves loop() on core 1 is alive, which separates
     // "the reporting code never runs" from "it runs and the audio is quiet". m0MixerCalls
@@ -569,9 +584,20 @@ void regular_checks() {
          Synth1.AmpEnv.isRunning() ? 1 : 0, (int)Synth1.mvaStack.n, (int)Synth1.mvaStack.notes[0],
          (unsigned)m0NoteOn[1], (unsigned)m0NoteOff[1],
          Synth2.AmpEnv.isRunning() ? 1 : 0, (int)Synth2.mvaStack.n, (int)Synth2.mvaStack.notes[0]);
-    m0Mode = (uint8_t)((m0Mode + 1u) % 3u);
-    m0ReverbBypass = (m0Mode == 1);
+    // M0: the write side. Every bus above is healthy, so if the amplifier is noisy the
+    // fault is here. short=0 means I2S accepted every byte and the digital stream to
+    // the DAC is intact, which moves the fault to the DAC module or the analog side.
+    // oobCache>0 would mean the sampler cursor left the cache, which nothing else in
+    // this run has shown; oobSample is the routine end-of-sample case.
+    DEBF("[M0] i2s=%u short=%u shortBytes=%u oobSample=%u oobCache=%u\r\n",
+         (unsigned)m0I2SCalls, (unsigned)m0ShortWrites, (unsigned)m0ShortBytes,
+         (unsigned)m0OobSample, (unsigned)m0OobCache);
     m0MixerCalls = 0;
+    m0I2SCalls = 0;
+    m0ShortWrites = 0;
+    m0ShortBytes = 0;
+    m0OobSample = 0;
+    m0OobCache = 0;
     m0NoteOn[0] = 0;  m0NoteOn[1] = 0;
     m0NoteOff[0] = 0; m0NoteOff[1] = 0;
     m0pk_drums = 0.0f;  m0pk_synth1 = 0.0f;  m0pk_synth2 = 0.0f;

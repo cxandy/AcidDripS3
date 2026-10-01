@@ -378,12 +378,21 @@ inline void Sampler::NoteOn( uint8_t note, uint8_t vol ) {
   }
 
 #ifdef GROUP_HATS
+  // M0: indexed with the raw MIDI note, not j. samplePlayer has SAMPLECNT entries (84)
+  // and note is a uint8_t that can reach 127, so this wrote past the end of the array
+  // and set .active = false on whatever struct happened to follow it in memory. The
+  // neighbouring sample is j+/-1, which is what the hat-choke was always meant to mean.
+  //
+  // Not proven to be firing in this configuration: the jukebox reaches the drum channel
+  // as current_drumkit + drum_note, and current_drumkit tops out at 72, so notes here
+  // stay under 83 and both forms happen to be in range. It is still wrong, and it goes
+  // out of range the moment a drumkit is added or an outside MIDI note arrives.
   switch (param_i) {
     case 7:
-      samplePlayer[note+1].active = false;
+      if ( j + 1 < sampleInfoCount ) { samplePlayer[j+1].active = false; }
       break;
     case 8:
-      samplePlayer[note-1].active = false;
+      if ( j >= 1 ) { samplePlayer[j-1].active = false; }
       break;
     default:
       break;
@@ -657,6 +666,15 @@ inline void Sampler::Process( float *left, float *right ) {
       if ( ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize) ||
            ((size_t)samplePlayer[i].sampleStart + dataOut + 1 >= (size_t)SAMPLER_CACHE_SIZE) ) {
         oobReads++;
+#if M0_DIAG
+        // M0: counted apart because the two conditions are not equally alarming. The
+        // first is the cursor reaching the end of its own sample, which fractional
+        // pitch makes routine and which the guard handles; the second is the cursor
+        // leaving the cache entirely, which it should never do. Reporting one combined
+        // number made a harmless rate look like a defect.
+        if ( (size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize ) { m0OobSample++; }
+        else { m0OobCache++; }
+#endif
         samplePlayer[i].active     = false;
         samplePlayer[i].samplePos  = 0;
         samplePlayer[i].samplePosF = 0.0f;

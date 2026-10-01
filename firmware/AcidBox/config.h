@@ -69,16 +69,19 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 
 /* M0 diagnostics */
 #define M0_DIAG 1     // the M0 diagnostic block. Set to 0 to strip it.
-#define M0_DIAG_MS 500   // report window in ms: peaks are measured, printed and the test
-                        // mode advanced once per this many. A whole 3-mode cycle is
-                        // therefore 1.5 s, short enough that any capture taken from
-                        // setup onwards contains all three modes -- three earlier runs
-                        // were lost to the window being longer than the operator's
-                        // patience, and a diagnostic you have to time is a bad one.
+#define M0_DIAG_MS 500   // report window in ms: peaks are measured and printed once per
+                        // this many.
                         // Cycles on its own because this board (ESP32-S3-WROOM) exposes
                         // no spare pin to press: GPIO23 exists on the chip and
                         // init_button() puts it in INPUT_PULLUP, but here it reads LOW
                         // with nothing attached and is not broken out.
+#define M0_DIAG_MODE_MS 3000  // how long each test mode holds before advancing. Longer
+                        // than the report window on purpose: mode 2 writes a known
+                        // silent buffer to the DAC, and whether the amplifier is still
+                        // noisy with it is a question only the operator can answer, so
+                        // it has to be long enough to hear rather than merely log.
+                        // The report stays at M0_DIAG_MS either way, so this just
+                        // yields six lines per mode instead of one.
 #if M0_DIAG
   // Which experiment is running, cycled from regular_checks() and read by mixer() and
   // by i2s_output(), so it is declared here rather than in AcidBox.ino.
@@ -96,6 +99,32 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
   // that will never decay, which is a continuous-noise source on its own.
   extern volatile uint32_t m0NoteOn[2];
   extern volatile uint32_t m0NoteOff[2];
+
+  // Bytes I2S.write() refused. A short write means the audio task outran the DMA and
+  // the ring buffer underran, which is the one remaining mechanism that produces
+  // continuous noise while every digital sample in this program is provably correct.
+  extern volatile uint32_t m0ShortWrites;
+  extern volatile uint32_t m0ShortBytes;
+  extern volatile uint32_t m0I2SCalls;
+
+  // The two conditions sampler Process() guards against, counted separately. The
+  // first is the play cursor reaching the end of its own sample, which pitch makes
+  // routine; the second is the cursor leaving the cache entirely, which is not.
+  extern volatile uint32_t m0OobSample;
+  extern volatile uint32_t m0OobCache;
+
+  // Every I2S.write() in i2s_setup.ino goes through this, so the return value is
+  // inspected in exactly one place. I2S.write() is documented to return the number of
+  // bytes accepted in core 3.x and its signature has changed across versions; if that
+  // turns out not to hold, this one macro is what has to change rather than the two
+  // call sites and their surroundings. Plain stores only, no printing: this is IRAM.
+  #define M0_I2S_WRITE() { \
+    size_t m0w_ = I2S.write((uint8_t*)out_buf[current_out_buf]._signed, \
+                            sizeof(out_buf[current_out_buf]._signed)); \
+    if ( m0w_ < sizeof(out_buf[current_out_buf]._signed) ) { \
+      m0ShortWrites++; \
+      m0ShortBytes += (uint32_t)(sizeof(out_buf[current_out_buf]._signed) - m0w_); \
+    } }
 #endif
 
 float bpm = 130.0f;
