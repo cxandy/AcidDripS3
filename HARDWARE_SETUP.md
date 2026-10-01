@@ -238,10 +238,13 @@ M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个
 | 能刷 `littlefs.bin` | **不能** | 能 |
 | 需要 HTTPS + Chrome/Edge | 是 | 是 |
 
-它的四个默认偏移是 `0x0 / 0x8000 / 0xe000 / 0x10000`，**和 `noota_3g` 完全一致**，
-所以固件那部分它能刷对。但它没有文件系统槽位，鼓组还得回去用 esptool 烧——
-于是变成"浏览器刷固件 + 命令行刷鼓组"两套流程，还得保持两个工具的产物同源。
-用 ESP Web Tools 一次做完。
+它只有四个**固件**槽位（bootloader / partition table / boot app0 / app），
+**没有文件系统槽位**，鼓组鼓包刷不进去，还是得回去用 esptool 烧 `littlefs.bin`。
+那就变成"浏览器刷固件 + 命令行刷鼓组"两套流程，还得保证两边用的是同一次 CI 的产物。
+
+而且它的 app 偏移是按 esp-idf 默认分区表推算的，`noota_3g` 的 otadata 在 `0xe000`
+而不是常见的 `0xe0000`——这种事让工具替你猜没好处。
+用 ESP Web Tools 一次做完，五个地址自己填，和 `flash-args.txt` 一一对应。
 
 **关键：必须插原生 USB 口（USB OTG，GPIO19/20），不能插 UART 桥。**
 
