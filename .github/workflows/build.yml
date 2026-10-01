@@ -73,18 +73,22 @@ env:
   #                      wrong fails silently -- it compiles, it just cannot
   #                      hold the 2.5 MB of drum kits.
   #   FlashSize=16M      Flash size of the target board. Raise if yours differs.
-  #   (no USBMode)       Left at the core default, USB-OTG (TinyUSB). An earlier
-  #                      revision added USBMode=hwcdc here to move the log onto the
-  #                      native USB port, on the mistaken belief that this board had
-  #                      no USB-UART bridge. It has one: the ROM reports
-  #                      rst:0x15 (USB_UART_CHIP_RESET), which only happens when a
-  #                      bridge chip drives EN. That build went silent, so hwcdc is
-  #                      reverted. firmware/README.md line 59 is true again.
+  #   USBMode=hwcdc      M0, temporary, and diagnostic only. It does NOT move the log:
+  #                      DEBUG_PORT is named Serial0 in config.h and stays on UART0.
+  #                      Its job is to bring the CDC up so setup() can write a marker
+  #                      to it, alongside one on UART0, and so a single flash shows
+  #                      which of the two this board's connector is wired to.
+  #   CDCOnBoot=cdc      Same reason, and required for it: the core default is
+  #                      Disabled, in which case HWCDC.h never defines the class and
+  #                      the port does not exist at all. The previous hwcdc-only
+  #                      build had this half right but left CDCOnBoot alone, which is
+  #                      why it went silent and looked like the log was broken.
+  # Both come back out once the port is known; see the probe in setup().
   # The merged-image step parses PartitionScheme= out of this FQBN to find the
   # core's partition CSV, then derives every flash offset from that CSV. So the
   # FQBN stays the single source of truth: change the scheme here and the merge
   # follows, with nothing to keep in sync by hand.
-  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
+  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M,USBMode=hwcdc,CDCOnBoot=cdc
 
 jobs:
   build:
@@ -158,6 +162,13 @@ jobs:
           grep -rn 'define[[:space:]]\+Serial' "${core}/cores/esp32/" || echo "(no 'define Serial' in cores/esp32)"
           echo "--- ARDUINO_USB_MODE guards ---"
           grep -rn 'ARDUINO_USB_MODE' "${core}/cores/esp32/HWCDC.h" || echo "(HWCDC.h absent, or no ARDUINO_USB_MODE in it)"
+          echo "--- which port the IDF console uses (explains the heap dumps) ---"
+          for sdk in $(find ~/.arduino15/packages/esp32 -name sdkconfig.h | sort); do
+            if grep -q 'CONFIG_IDF_TARGET_ESP32S3' "$sdk"; then
+              grep -E 'CONFIG_ESP_CONSOLE' "$sdk" || echo "  (no CONFIG_ESP_CONSOLE lines)"
+              break
+            fi
+          done
 
       - name: Check TinyUSB MIDI is compiled in
         # MIDIUSB_ESP32.h is wrapped in #if CONFIG_TINYUSB_MIDI_ENABLED. If the

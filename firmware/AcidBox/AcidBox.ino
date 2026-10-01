@@ -256,6 +256,24 @@ void setup(void) {
 
 #ifdef DEBUG_ON 
   DEBUG_PORT.begin(115200); 
+  delay(50);
+  // M0: port probe. One marker per candidate port, so a single flash settles which
+  // USB path this board actually wires, instead of the third round of guessing.
+  // Written directly rather than through DEBF/DEBUG so it does not depend on the
+  // macros below resolving to anything in particular.
+  DEBUG_PORT.println("[M0] probe: UART0 (Serial0) begin ok");
+  DEBUG_PORT.flush();
+#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+  // Same condition HWCDC.h guards its own class definition with, so this compiles
+  // whether or not the CDC came up. Only meaningful with USBMode=hwcdc and
+  // CDCOnBoot=Enabled in the FQBN; with the core default the port never exists.
+  HWCDCSerial.begin(115200);
+  HWCDCSerial.println("[M0] probe: HWCDC (native USB) begin ok");
+  HWCDCSerial.flush();
+  delay(50);
+  HWCDCSerial.println("[M0] probe: HWCDC second line");
+  HWCDCSerial.flush();
+#endif
 #endif
 delay(200);
 
