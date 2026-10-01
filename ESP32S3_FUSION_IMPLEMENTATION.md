@@ -221,8 +221,9 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 **已确认的三件事**
 
 - **TinyUSB MIDI 是开启的。** `MIDIUSB_ESP32.h` 整个包在 `#if CONFIG_TINYUSB_MIDI_ENABLED` 里，为 0 时该类不存在，而 `USB-MIDI.h:84` 在 ESP32 上无条件调用 `MidiUSB.begin()`——编译能过，就证明该宏为 1。这条原本列为风险，现已闭环。
-- **固件 616,724 字节（58%），装得进 1 MB 分区。** 剩余 431,852 字节。M1–M4 的增量（音序器 + TFT + FX）需要留意这个余量。
-  （此前这里写的"806 KB / 剩 223 KB"是错的：806 KB 是 GitHub **artifact 压缩包**的大小，不是固件大小。真实数字取自 arduino-cli 的 `Sketch uses`。）
+- **固件 616,880 字节，装得进 1 MB 分区。** 剩余 431,696 字节。M1–M4 的增量（音序器 + TFT + FX）需要留意这个余量。
+  （此前这里写的"806 KB / 剩 223 KB"是错的：806 KB 是 GitHub **artifact 压缩包**的大小，不是固件大小。）
+  （直接用 arduino-cli 的 `Sketch uses 616724 bytes (58%)` 也不对：那是 sketch 大小，`.bin` 另带 156 字节的 image header 和段对齐填充。**能不能装下看的是 `.bin` 的大小**，CI 的余量表现在按实际文件算，并把 arduino 那个数并排列出。）
 - **8 套鼓组（2.55 MB）装得进 3 MB LittleFS 分区。** 原本只是估计装得下，现在 CI 已经从锁定的上游 commit 构建出 `littlefs.bin` 并通过。这解除了 R4 的一半。
 
 **固件产物：CI 现在交付完整烧录包**
@@ -232,6 +233,36 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 - 从 core 里复制出 `boot_app0.bin`，四个偏移量按 `platform.txt:349` 的上传配方写入 `flash-args.txt`（偏移量取自 platform.txt，不取自本文档或任何教程）
 - 用 `mklittlefs` 从上游 `data/` 构建 `littlefs.bin`（core 本身不带这个工具），装不下就让 build 变红
 - 把 app 分区与 LittleFS 分区两个余量写进 run 页面
+- **再把四块内容拼成一个 4 MiB 的 `merged.bin`，地址 `0x0`**，浏览器烧写从此只有一个文件、一行、一个按钮
+
+**`merged.bin` 为什么成立，以及它怎么被验证的**
+
+`noota_3g` 在 `0x0` 到 `0x400000` 之间是**一段连续无空洞**的布局：
+
+```
+bootloader 0x000000 │ partitions 0x008000 │ nvs 0x009000 │ otadata 0x00E000
+app0 0x010000 │ spiffs 0x110000 │ coredump 0x3F0000 → 结束于 0x400000
+```
+
+所以"五个文件五个地址"可以塌成"一个文件一个地址"。偏移量**从 core 自己的
+`noota_3g.csv` 解析**（方案名取自 FQBN 的 `PartitionScheme=`，也就是 arduino-cli 真正编译用的值），
+不写死——`0xe000` / `0xe0000` 这种坑正是靠这个躲掉的。
+
+关键在于**验证**：arduino-cli 1.5.1 自己会额外产出一个整片 16 MiB 的
+`AcidBox.ino.merged.bin`。那是工具链对同一个问题的答案，所以合并步骤拿它当基准，
+逐字节比对我们放在 CSV 偏移上的 bootloader / 分区表 / otadata / app 四段，不一致就让
+构建失败。run #14 已经通过（`0x0`、`0x8000`、`0xe000`、`0x10000` 四段全部 `agrees`）。
+这把"CSV 里的偏移就是构建用的偏移"从假设变成了检查，而这是本项目最容易被教程带偏的一个数。
+
+> 这个偏移交叉验证还顺带暴露了一件更基础的事：arduino-cli 的产物叫
+> **`AcidBox.ino.bin`**，不是 `AcidBox.bin`，也不是 `firmware.bin`——它按
+> `<工程文件名>.ino.<类型>.bin` 命名。三个名字连着猜错两次，才终于去读了构建目录。
+> 现在按后缀识别（排除 `*.bootloader.bin` / `*.partitions.bin` / `*.merged.bin` /
+> `boot_app0.bin`），并统一改名成 `bootloader.bin` / `partitions.bin` / `firmware.bin`，
+> 让文档和 `flash-args.txt` 里的名字是真的躺在 artifact 里的名字。
+> `tools/merge-image.py` 有 9 个用例的本地测试（`python tools/test-merge-image.py`），
+> 其中一个专门把基准镜像的某个字节改坏，用来证明这个交叉检查真的会咬人、
+> 而不是"因为什么都没比所以通过"。
 
 块大小 4096 不是随便填的：`LittleFSFS::begin()` 只设了 `grow_on_mount = true`，块大小走 IDF 默认值。不匹配的后果特别恶劣——`FORMAT_LITTLEFS_IF_FAILED` 是 `true`，镜像挂不上不会报错，而是**静默格式化分区**，鼓组退回 `samples.h` 里那套 8-bit 内嵌采样，听起来"能动"，但已经不是 808 采样了。
 
