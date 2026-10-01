@@ -39,6 +39,28 @@ env:
 
   SKETCH_DIR: firmware/AcidBox
 
+  # LittleFS image geometry. Read out of the partition table rather than
+  # hardcoded, so changing PartitionScheme cannot silently desync the two:
+  #   tools/partitions/noota_3g.csv -> spiffs at 0x110000, size 0x2E0000
+  #
+  # block_size 4096 matches what arduino-esp32's LittleFSFS::begin() asks for.
+  # It passes an empty esp_vfs_littlefs_conf_t and sets only grow_on_mount =
+  # true, leaving the IDF wrapper on its 4096 default. mklittlefs must be told
+  # the same number or the image will not mount -- and because config.h sets
+  # FORMAT_LITTLEFS_IF_FAILED true, a failed mount silently reformats the
+  # partition and erases the drum kits instead of reporting the problem.
+  FS_BLOCK_SIZE: 4096
+  FS_PARTITION_LABEL: spiffs
+  FS_PARTITION_SIZE: 3014656     # 0x2E0000
+
+  # Where the 2.5 MB of drum samples come from. They are not committed here
+  # (see .gitignore) but they are not secret either -- they are fetched from
+  # the pinned upstream commit so the image is byte-reproducible.
+  ACIDBOX_REPO: https://github.com/copych/AcidBox.git
+  ACIDBOX_BRANCH: S3-regular
+
+  MKLITTLEFS_VERSION: 4.1.0
+
   # Board: ESP32S3 Dev Module, as the AcidBox README specifies.
   #
   #   PSRAM=opi          OPI PSRAM. config.h enables PRELOAD_ALL, whose
@@ -143,12 +165,109 @@ jobs:
           echo "--- sketch size ---"
           grep -E 'Sketch uses|Global variables' build.log || echo "(not in log)"
 
+      - name: Assemble the flash bundle
+        if: success()
+        run: |
+          # --export-binaries leaves bootloader.bin / partitions.bin /
+          # firmware.bin in the build path, but boot_app0.bin lives in the
+          # core's tools/partitions/ and is never copied over. Without it the
+          # otadata partition is never initialised, and people copy 0xe0000
+          # from other tutorials -- which is wrong here, because noota_3g
+          # gives nvs 0x5000 instead of 0x4000 and pushes otadata up by 4 KB.
+          #
+          # Rather than trust anyone (including this file) to remember four
+          # hex offsets, derive them and ship a ready-to-paste command line.
+          set -euo pipefail
+          build="${{ runner.temp }}/build"
+
+          # -print -quit, not `find ... | head -1`: head closing the pipe early
+          # kills find with SIGPIPE, which pipefail turns into a step failure.
+          boot_app0=$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin -print -quit)
+          if [ -z "$boot_app0" ]; then
+            echo "::error::boot_app0.bin not found in the installed core -- flash offsets unknown"
+            exit 1
+          fi
+          cp "$boot_app0" "$build/boot_app0.bin"
+          echo "boot_app0.bin: $boot_app0 ($(stat -c%s "$boot_app0") bytes)"
+
+          # Offsets below match tools.esptool_py.upload.pattern_args in the
+          # core's platform.txt, which is the authority -- not this comment.
+          cat > "$build/flash-args.txt" <<'EOF'
+          Replace <COM> with your port, e.g. COM5. Install esptool with:
+            pip install esptool
+          The core pins esptool 5.3.1, so subcommands are hyphenated.
+          Use `python -m esptool` so the entry-point name does not matter.
+
+          python -m esptool --chip esp32s3 --port <COM> --baud 921600 \
+            --before default-reset --after hard-reset \
+            write-flash --flash-mode keep --flash-freq keep --flash-size keep \
+            0x0 bootloader.bin 0x8000 partitions.bin \
+            0xe000 boot_app0.bin 0x10000 firmware.bin
+          EOF
+
+          ls -l "$build"/*.bin "$build"/flash-args.txt
+
+      - name: Build the LittleFS drum kit image
+        if: success()
+        run: |
+          # AcidBox reads its drum kits from a 3 MB LittleFS partition at
+          # runtime (sampler.ino:119). The kits are ~2.55 MB, so the image has
+          # to be built from the real upstream samples -- the firmware only
+          # carries a 256 KB set of 8-bit fallbacks in samples.h.
+          set -euo pipefail
+          out="${{ runner.temp }}/littlefs"
+
+          # mklittlefs is NOT in the esp32 core -- arduino-esp32 ships
+          # boot_app0.bin and the partition CSVs under tools/partitions, but
+          # no filesystem builder. Take the prebuilt from earlephilhower.
+          curl -fsSL -o mklittlefs.tar.gz \
+            "https://github.com/earlephilhower/mklittlefs/releases/download/${MKLITTLEFS_VERSION}/x86_64-linux-gnu-mklittlefs-42acb97.tar.gz"
+          tar -xzf mklittlefs.tar.gz
+          mk=$(find . -name mklittlefs -type f -print -quit)
+          if [ -z "$mk" ]; then
+            echo "::error::mklittlefs not found inside the ${MKLITTLEFS_VERSION} tarball"
+            exit 1
+          fi
+          install -m 0755 "$mk" /usr/local/bin/mklittlefs
+          mklittlefs --version || true
+
+          git clone --depth 1 --branch "$ACIDBOX_BRANCH" "$ACIDBOX_REPO" acidbox
+          echo "upstream data/ commit: $(git -C acidbox rev-parse --short HEAD)"
+
+          mkdir -p "$out"
+          # mklittlefs exits non-zero if the tree does not fit, which is the
+          # outcome we want: better a red build than an image that only mounts
+          # on paper. The margin is printed either way.
+          if ! mklittlefs -c acidbox/data \
+                          -p "$FS_BLOCK_SIZE" \
+                          -b "$FS_BLOCK_SIZE" \
+                          -s "$FS_PARTITION_SIZE" \
+                          "$out/littlefs.bin" 2>&1 | tee mklittlefs.log; then
+            echo "::error::drum kits do not fit the $FS_PARTITION_SIZE byte $FS_PARTITION_LABEL partition"
+            echo "::error::drop a kit from AcidBox/data/ or switch to a partition scheme with more filesystem"
+            exit 1
+          fi
+
+          used=$(stat -c%s "$out/littlefs.bin")
+          echo "littlefs.bin              : $used bytes"
+          echo "partition ($FS_PARTITION_LABEL): $FS_PARTITION_SIZE bytes"
+          echo "image headroom            : $((FS_PARTITION_SIZE - used)) bytes"
+          echo "image sha256              : $(sha256sum "$out/littlefs.bin" | cut -d' ' -f1)"
+
       - name: Upload firmware binary
         if: success()
         uses: actions/upload-artifact@v5
         with:
           name: AcidDripS3-firmware
           path: ${{ runner.temp }}/build/*.bin
+          if-no-files-found: error
+
+      - name: Upload LittleFS image
+        if: success()
+        uses: actions/upload-artifact@v5
+        with:
+          name: AcidDripS3-littlefs
+          path: ${{ runner.temp }}/littlefs/littlefs.bin
           if-no-files-found: error
 
       - name: Upload build log
