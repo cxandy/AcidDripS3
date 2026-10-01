@@ -34,14 +34,18 @@
 
 // M0: MIDI_USB_DEVICE off, USB MIDI temporarily sacrificed for the debug log.
 //
-// This board has only the native USB-OTG port, no USB-UART bridge, so DEBUG_PORT
-// (= Serial = UART0 on GPIO43/44) has no bridge to reach. Moving the port to
-// USBMode=hwcdc in the FQBN is the only way to get the log out of the one cable.
+// The board turned out to have a USB-UART bridge after all: it boots reporting
+// rst:0x15 (USB_UART_CHIP_RESET), which the ROM only reports when a bridge chip
+// drives EN. So UART0 does reach the single USB connector, and DEBUG_PORT below
+// is back on UART0 where it belongs. An earlier revision of this file claimed the
+// opposite and pushed the log onto USBMode=hwcdc; that moved Serial to
+// HWCDCSerial (HardwareSerial.h:444) and the log went silent while the IDF
+// console on UART0 kept printing, which is how the mistake showed itself.
 //
-// On ESP32-S3 the USB-Serial-JTAG and USB-OTG peripherals share GPIO19/20 and one
-// PHY, so they are mutually exclusive: a CDC console and TinyUSB MIDI cannot both
-// run on that port. USB MIDI returns when a CP2102/CH343 USB-TTL module is added
-// on GPIO43/44, which is the permanent fix and needs no FQBN change.
+// USB MIDI still goes unused here, for a different reason: with the bridge
+// owning that connector the native USB-OTG port is not what the cable is
+// plugged into. Re-enabling it costs ~50 kB of RAM for a port this board does
+// not expose.
 //#define MIDI_USB_DEVICE       // use this option if you want to operate via USB with the sampler seen as a MIDI device (-50 kBytes of available RAM)
 // #define MIDI_VIA_SERIAL       // use this option to enable Hairless MIDI on Serial port @115200 baud (USB connector), THIS WILL BLOCK SERIAL DEBUGGING as well
 //#define MIDI_VIA_SERIAL2        // use this option if you want to operate by standard MIDI @31250baud, UART2 (Serial2),
@@ -156,7 +160,12 @@ const float  NORM_RADIANS = ONE_DIV_TWOPI * TABLE_SIZE;
 #if (defined BOARD_HAS_UART_CHIP)
   #define MIDI_PORT_TYPE HardwareSerial
   #define MIDI_PORT Serial
-  #define DEBUG_PORT Serial
+  // M0: pinned to Serial0 rather than to Serial. The core defines Serial from
+  // USBMode (HardwareSerial.h:444/447/451 in core 3.3.12), so DEBUG_PORT = Serial
+  // silently became HWCDCSerial under USBMode=hwcdc and the log vanished while
+  // the IDF console on UART0 carried on printing. Naming UART0 directly makes the
+  // log path independent of that menu option.
+  #define DEBUG_PORT Serial0
 #else
   #if (ESP_ARDUINO_VERSION_MAJOR < 3)
     #define MIDI_PORT_TYPE HWCDC
