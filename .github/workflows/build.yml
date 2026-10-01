@@ -172,12 +172,13 @@ jobs:
       - name: Assemble the flash bundle
         if: success()
         run: |
-          # --export-binaries leaves bootloader.bin / partitions.bin /
-          # firmware.bin in the build path, but boot_app0.bin lives in the
-          # core's tools/partitions/ and is never copied over. Without it the
-          # otadata partition is never initialised, and people copy 0xe0000
-          # from other tutorials -- which is wrong here, because noota_3g
-          # gives nvs 0x5000 instead of 0x4000 and pushes otadata up by 4 KB.
+          # --export-binaries leaves bootloader.bin / partitions.bin and the
+          # application binary in the build path, but boot_app0.bin lives in
+          # the core's tools/partitions/ and is never copied over. Without it
+          # the otadata partition is never initialised, and people copy
+          # 0xe0000 from other tutorials -- which is wrong here, because
+          # noota_3g gives nvs 0x5000 instead of 0x4000 and pushes otadata up
+          # by 4 KB.
           #
           # Rather than trust anyone (including this file) to remember four
           # hex offsets, derive them and ship a ready-to-paste command line.
@@ -194,19 +195,41 @@ jobs:
           cp "$boot_app0" "$build/boot_app0.bin"
           echo "boot_app0.bin: $boot_app0 ($(stat -c%s "$boot_app0") bytes)"
 
+          # The application binary is named after the sketch, so this is
+          # AcidBox.bin and not firmware.bin. Guessing wrong here writes a
+          # command line that fails for the user, which is a worse way to
+          # learn the name than a local ls. Whatever .bin is left in the build
+          # path once the three core files are accounted for is the app.
+          app_bins=()
+          for f in "$build"/*.bin; do
+            case "$(basename "$f")" in
+              bootloader.bin|partitions.bin|boot_app0.bin) ;;
+              *) app_bins+=("$(basename "$f")") ;;
+            esac
+          done
+          if [ "${#app_bins[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one application .bin in $build, found: ${app_bins[*]:-none}"
+            ls -l "$build"/*.bin
+            exit 1
+          fi
+          app_bin="${app_bins[0]}"
+          echo "APP_BIN=$app_bin" >> "$GITHUB_ENV"
+          echo "application binary: $app_bin ($(stat -c%s "$build/$app_bin") bytes)"
+
           # Offsets below match tools.esptool_py.upload.pattern_args in the
           # core's platform.txt, which is the authority -- not this comment.
-          cat > "$build/flash-args.txt" <<'EOF'
+          # Unquoted heredoc so $app_bin lands in the pasted command.
+          cat > "$build/flash-args.txt" <<EOF
           Replace <COM> with your port, e.g. COM5. Install esptool with:
             pip install esptool
           The core pins esptool 5.3.1, so subcommands are hyphenated.
-          Use `python -m esptool` so the entry-point name does not matter.
+          Use \`python -m esptool\` so the entry-point name does not matter.
 
-          python -m esptool --chip esp32s3 --port <COM> --baud 921600 \
-            --before default-reset --after hard-reset \
-            write-flash --flash-mode keep --flash-freq keep --flash-size keep \
-            0x0 bootloader.bin 0x8000 partitions.bin \
-            0xe000 boot_app0.bin 0x10000 firmware.bin
+          python -m esptool --chip esp32s3 --port <COM> --baud 921600 \\
+            --before default-reset --after hard-reset \\
+            write-flash --flash-mode keep --flash-freq keep --flash-size keep \\
+            0x0 bootloader.bin 0x8000 partitions.bin \\
+            0xe000 boot_app0.bin 0x10000 $app_bin
           EOF
 
           # Checksums so the download can be verified. Windows has certutil,
@@ -315,134 +338,12 @@ jobs:
           # page; the same text on stderr is just "Process completed with
           # exit code 1". sys.exit("::error::...") is stderr, so a real
           # diagnosis used to be invisible exactly when it was needed.
-          python3 - "$FQBN" "$HOME/.arduino15/packages/esp32/hardware/esp32" \
+          python3 tools/merge-image.py \
+                   "$FQBN" \
+                   "$HOME/.arduino15/packages/esp32/hardware/esp32" \
                    "${{ runner.temp }}/build" \
                    "${{ runner.temp }}/littlefs/littlefs.bin" \
-                   "${{ runner.temp }}/merged/merged.bin" > merge-report.md <<'PY'
-          import csv as _csv, glob, hashlib, os, sys
-
-          fqbn, core_root, build_dir, fs_path, out_path = sys.argv[1:6]
-
-          def die(msg):
-              # stdout on purpose: this becomes an annotation on the commit
-              # page, which is the one place the reason is readable without
-              # digging through the run log.
-              print(f"::error::{msg}")
-              sys.exit(1)
-
-          def num(s):
-              return int(s.strip(), 0)
-
-          # Partition scheme straight out of the FQBN -- the same string
-          # arduino-cli built with.
-          scheme = ""
-          for field in fqbn.split(","):
-              if field.startswith("PartitionScheme="):
-                  scheme = field.split("=", 1)[1]
-          if not scheme:
-              die(f"no PartitionScheme= in FQBN: {fqbn}")
-
-          hits = glob.glob(os.path.join(core_root, "*", "tools", "partitions",
-                                        f"{scheme}.csv"))
-          if not hits:
-              die(f"{scheme}.csv not found under {core_root}; looked in "
-                  f"{os.path.join(core_root, '*', 'tools', 'partitions')}")
-          csv_path = hits[0]
-          print(f"partition scheme: {scheme}")
-          print(f"partition CSV: {csv_path}")
-
-          parts = []
-          with open(csv_path, newline="") as fh:
-              for row in _csv.reader(fh):
-                  # Skip the "# Name, Type, ..." header and blank lines.
-                  # Filter whole rows, never individual cells: dropping the
-                  # '#' cell would silently leave 'Type' as the name and
-                  # 'Size' as the offset.
-                  if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
-                      continue
-                  if len(row) < 5:
-                      continue
-                  name, _type, _sub, off, size = (row + [""] * 5)[:5]
-                  try:
-                      parts.append((name.strip(), num(off), num(size)))
-                  except ValueError:
-                      die(f"cannot parse partition row {row!r} in {csv_path}")
-          if not parts:
-              die(f"no partitions parsed from {csv_path}")
-
-          # The partition table itself lives at the fixed 0x8000 and is not a
-          # row in the CSV; the bootloader fills everything below it.
-          by_name = {p[0]: p for p in parts}
-          need = ("otadata", "app0")
-          for n in need:
-              if n not in by_name:
-                  die(f"partition {n!r} missing from {csv_path}")
-
-          app_off, app_size = by_name["app0"][1], by_name["app0"][2]
-          fs_name = os.environ["FS_PARTITION_LABEL"]
-          if fs_name not in by_name:
-              die(f"no partition labelled {fs_name!r} in {csv_path}")
-          fs_off, fs_size = by_name[fs_name][1], by_name[fs_name][2]
-          ota_off = by_name["otadata"][1]
-          total = max(o + s for _n, o, s in parts)
-
-          def path_of(name):
-              return fs_path if name == "littlefs.bin" else os.path.join(build_dir, name)
-
-          pieces = [
-              ("bootloader.bin", 0x0),
-              ("partitions.bin", 0x8000),
-              ("boot_app0.bin",  ota_off),
-              ("firmware.bin",   app_off),
-              ("littlefs.bin",   fs_off),
-          ]
-
-          buf = bytearray(b"\xff" * total)
-          print("| file | address | bytes | sha256 (first 16) |")
-          print("|---|---|---|---|")
-          for name, off in pieces:
-              p = path_of(name)
-              if not os.path.exists(p):
-                  die(f"{name} missing at {p}")
-              with open(p, "rb") as fh:
-                  data = fh.read()
-              if off + len(data) > total:
-                  die(f"{name} at 0x{off:x} + {len(data)} runs past 0x{total:x}")
-              buf[off:off + len(data)] = data
-              print(f"| {name} | 0x{off:x} | {len(data)} | "
-                    f"{hashlib.sha256(data).hexdigest()[:16]} |")
-
-          # The app and the filesystem have hard limits. Overrunning either is
-          # silent corruption in a merged image -- the neighbouring partition
-          # just gets eaten -- so refuse instead of writing it.
-          for name, limit in (("firmware.bin", app_size), ("littlefs.bin", fs_size)):
-              used = os.path.getsize(path_of(name))
-              if used > limit:
-                  die(f"{name} is {used} bytes, only {limit} available")
-
-          with open(out_path, "wb") as fh:
-              fh.write(buf)
-
-          # Read the merged image back and prove every byte landed where the
-          # CSV says it should. A merge bug that ships is far worse than a
-          # merge bug that fails here.
-          with open(out_path, "rb") as fh:
-              check = fh.read()
-          if len(check) != total:
-              die(f"merged image is {len(check)} bytes, expected {total}")
-          for name, off in pieces:
-              with open(path_of(name), "rb") as fh:
-                  data = fh.read()
-              if check[off:off + len(data)] != data:
-                  die(f"verify failed: {name} != merged[0x{off:x}:]")
-
-          print(f"| **merged.bin** | **0x0** | **{total}** | "
-                f"**{hashlib.sha256(check).hexdigest()[:16]}** |")
-          print()
-          print(f"Flash this ONE file at 0x0. It covers 0x0-0x{total:x}, which is")
-          print(f"every partition in {os.path.basename(csv_path)}. Padding between")
-          print("partitions is 0xFF, i.e. erased flash.")
-          PY
+                   "${{ runner.temp }}/merged/merged.bin" > merge-report.md
 
           cat merge-report.md
           {

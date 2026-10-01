@@ -177,7 +177,7 @@ GND              ──►  GND
 | artifact | 内容 | 什么时候用 |
 |---|---|---|
 | **`AcidDripS3-merged`** | **`merged.bin`（4 MiB，一个文件）+ `README.md`** | **平时就用它，见 §5.5** |
-| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`firmware.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` | 要单独重刷某一块，或想在命令行里刷 |
+| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`AcidBox.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` | 要单独重刷某一块，或想在命令行里刷 |
 | `AcidDripS3-littlefs` | `littlefs.bin`（鼓组音色原始镜像，见 §6） | 同上 |
 
 `--export-binaries` 会把三个 `.bin` 放进构建目录；`boot_app0.bin` 来自 core 内部的
@@ -206,8 +206,13 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
   --before default-reset --after hard-reset `
   write-flash --flash-mode keep --flash-freq keep --flash-size keep `
   0x0 bootloader.bin 0x8000 partitions.bin `
-  0xe000 boot_app0.bin 0x10000 firmware.bin
+  0xe000 boot_app0.bin 0x10000 AcidBox.bin
 ```
+
+应用固件叫 **`AcidBox.bin`**，不叫 `firmware.bin` —— arduino-cli 用**工程（sketch）名**
+给产物命名，`firmware/AcidBox/AcidBox.ino` 就编出 `AcidBox.bin`。CI 不会去猜这个文件名：
+它把构建目录里三个已知文件（`bootloader.bin` / `partitions.bin` / `boot_app0.bin`）
+排除后剩下的那个 `.bin` 就是应用，名字自动填进 `flash-args.txt`。改工程名也不会坏。
 
 对应的偏移表（来自 core 的 `platform.txt:349` 上传配方 + `noota_3g.csv`）：
 
@@ -216,7 +221,7 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
 | `0x0` | `bootloader.bin` | — |
 | `0x8000` | `partitions.bin` | — |
 | `0xe000` | `boot_app0.bin` | 8 KB |
-| `0x10000` | `firmware.bin` | **1 MB（`upload.maximum_size=1048576`）** |
+| `0x10000` | `AcidBox.bin` | **1 MB（`upload.maximum_size=1048576`）** |
 
 `--baud` 460800 也很稳，线不好就降。
 
@@ -224,7 +229,7 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
 > `noota_3g.csv` 把 nsv 分成 0x5000（默认 0x4000），把 otadata 从 `0xd000` 顶到了 `0xe000`。
 > 写错就等于把 otadata 写进了空隙里。
 
-当前 `firmware.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
+当前 `AcidBox.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
 （GitHub Actions 页面上 `AcidDripS3-firmware` artifact 显示的 806 KB 是**压缩包**大小，不是固件大小。）
 M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个余量。
 
@@ -284,7 +289,7 @@ flash size / mode / freq 写进镜像头里了，工具再改一遍只会引入�
 | `0x0` | `bootloader.bin` | `AcidDripS3-firmware` |
 | `0x8000` | `partitions.bin` | `AcidDripS3-firmware` |
 | `0xe000` | `boot_app0.bin` | `AcidDripS3-firmware` |
-| `0x10000` | `firmware.bin` | `AcidDripS3-firmware` |
+| `0x10000` | `AcidBox.bin` | `AcidDripS3-firmware` |
 | `0x110000` | `littlefs.bin` | `AcidDripS3-littlefs` |
 
 命令行版本见 §5.4 的 `flash-args.txt` 和 §6 的第二条命令。
