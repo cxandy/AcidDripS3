@@ -100,6 +100,8 @@ static int    ctrl_hold_notes;
 static volatile bool m0ReverbBypass = false;
 volatile uint8_t  m0Mode = 0;
 volatile uint32_t m0MixerCalls = 0;
+volatile uint32_t m0NoteOn[2]  = { 0, 0 };
+volatile uint32_t m0NoteOff[2] = { 0, 0 };
 
 // Peak amplitude of each bus in mixer(), read and printed from regular_checks().
 // Written from the IRAM audio task, so plain stores only: no printing, and no libm
@@ -557,9 +559,21 @@ void regular_checks() {
          (double)m0pk_drums, (double)m0pk_synth1, (double)m0pk_synth2,
          (double)m0pk_delay, (double)m0pk_reverb, (double)m0pk_out,
          (int)m0Bad);
+    // M0: voice liveness. env=1 means the amp envelope is still running, so the voice
+    // is still producing samples. n is the note-allocator depth and note the note it
+    // is holding. on/off are this window's counts, so "on climbs, off stays 0" is a
+    // sequencer that never releases, and "env=1 with off climbing" is a release that
+    // is not reaching the envelope. Those are different faults and this separates them.
+    DEBF("[M0] s1 on=%u off=%u env=%d n=%d note=%d | s2 on=%u off=%u env=%d n=%d note=%d\r\n",
+         (unsigned)m0NoteOn[0], (unsigned)m0NoteOff[0],
+         Synth1.AmpEnv.isRunning() ? 1 : 0, (int)Synth1.mvaStack.n, (int)Synth1.mvaStack.notes[0],
+         (unsigned)m0NoteOn[1], (unsigned)m0NoteOff[1],
+         Synth2.AmpEnv.isRunning() ? 1 : 0, (int)Synth2.mvaStack.n, (int)Synth2.mvaStack.notes[0]);
     m0Mode = (uint8_t)((m0Mode + 1u) % 3u);
     m0ReverbBypass = (m0Mode == 1);
     m0MixerCalls = 0;
+    m0NoteOn[0] = 0;  m0NoteOn[1] = 0;
+    m0NoteOff[0] = 0; m0NoteOff[1] = 0;
     m0pk_drums = 0.0f;  m0pk_synth1 = 0.0f;  m0pk_synth2 = 0.0f;
     m0pk_delay = 0.0f;  m0pk_reverb = 0.0f;  m0pk_out = 0.0f;
     m0Bad = 0;
@@ -651,7 +665,6 @@ void IRAM_ATTR mixer() { // sum buffers
       M0_TRACK(m0pk_synth2, synth2_out_l);
       M0_TRACK(m0pk_delay,  dly_l);
       M0_TRACK(m0pk_reverb, rvb_l);
-      M0_TRACK(m0pk_out,    mix_buf_l[current_out_buf][i]);
 #endif
       mono_mix = 0.5f * (mix_buf_l[current_out_buf][i] + mix_buf_r[current_out_buf][i]);
   //    Comp.Process(mono_mix);     // calculate gain based on a mono mix
@@ -670,6 +683,13 @@ void IRAM_ATTR mixer() { // sum buffers
   //    mix_buf_r[current_out_buf][i] = fclamp(mix_buf_r[current_out_buf][i] , -1.0f, 1.0f);
      mix_buf_l[current_out_buf][i] = fast_shape( mix_buf_l[current_out_buf][i]); // soft limitter/saturator
      mix_buf_r[current_out_buf][i] = fast_shape( mix_buf_r[current_out_buf][i]);
+#if M0_DIAG
+     // M0: measured HERE, not on the raw bus sum. The probe used to sit before the
+     // 0.25f gain and before fast_shape, so it reported 2.5568 for a signal that was
+     // actually about 0.64 and cleanly saturated -- it was reading pre-gain and
+     // saying nothing about what reaches the DAC. This is the level that matters.
+     M0_TRACK(m0pk_out, mix_buf_l[current_out_buf][i]);
+#endif
    }
 #ifdef DEBUG_MASTER_OUT
   meter *= 0.95f;

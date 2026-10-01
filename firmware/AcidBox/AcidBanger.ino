@@ -1,3 +1,12 @@
+// M0: pulled in explicitly rather than relying on AcidBox.ino having included it.
+// This file sorts before AcidBox.ino when the .ino files are concatenated, so the M0
+// externs below may not be declared yet at this point in the translation unit. That
+// failure is silent and nasty: an undeclared identifier in `#if M0_DIAG` evaluates to
+// 0, so the code compiles and the counters simply never increment, and the diagnostic
+// reports plausible-looking zeros with nothing behind them. config.h has #pragma once,
+// so including it here as well costs nothing.
+#include "config.h"
+
 #ifdef JUKEBOX
 // This is The "Endless Acid Banger"
 //
@@ -402,6 +411,17 @@ static void init_button(struct Button *button, byte pin, uint8_t num)
 static void instr_noteoff(byte instr) {
   Instrument *ins = &instruments[instr];
 
+#if M0_DIAG
+  // M0: a voice that never gets a note-off is a latched oscillator. The bench peak
+  // for synth2 sat at ~0.376 for ten consecutive windows -- the same few values
+  // recurring rather than a signal moving -- while Init() sets a 1230 ms amp decay,
+  // so no decaying voice can look like that. Counting note-ons against note-offs
+  // per instrument says directly whether the sequencer is failing to release, or
+  // releasing into an envelope that will not fall. instruments[0] and [1] are the
+  // two synths (init_instruments), 2..7 are drums.
+  if ( instr < 2 ) { m0NoteOff[instr]++; }
+#endif
+
   if (ins->playing_note != 0) {
     if (ins->noteoff != NULL)
       ins->noteoff(ins->midi_channel, ins->playing_note);
@@ -417,6 +437,10 @@ static void instr_allnotesoff() {
 
 static void instr_noteon_raw(byte instr, byte note, byte vol, byte do_glide) {
   Instrument *ins = &instruments[instr];
+
+#if M0_DIAG
+  if ( instr < 2 ) { m0NoteOn[instr]++; }   // see instr_noteoff()
+#endif
 
   // All instruments are monophonic, so noteoff before noteon
   if (ins->playing_note != 0) {

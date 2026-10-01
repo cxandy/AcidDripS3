@@ -90,6 +90,12 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
   //                          I2S write and the DAC module from everything upstream.
   extern volatile uint8_t m0Mode;
   extern volatile uint32_t m0MixerCalls;   // proves the audio task is actually running
+
+  // Note-ons and note-offs per synth instrument, incremented in AcidBanger.ino.
+  // A synth whose on-count climbs while its off-count does not is holding a voice
+  // that will never decay, which is a continuous-noise source on its own.
+  extern volatile uint32_t m0NoteOn[2];
+  extern volatile uint32_t m0NoteOff[2];
 #endif
 
 float bpm = 130.0f;
