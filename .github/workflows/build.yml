@@ -26,7 +26,16 @@ env:
   # for a version that has no release tarball just 404s.
   ARDUINO_CLI_VERSION: 1.5.1
   ESP32_CORE_VERSION: 3.3.12
-  MIDI_LIB_VERSION: 4.2.0
+
+  # Must be 5.x. AcidBox's vendored src/usbmidi uses
+  # MidiType::SystemExclusiveStart / SystemExclusiveEnd, and that pair of names
+  # only exists in 5.0.0 and later -- 4.x spells the 0xF0 status byte
+  # MidiType::SystemExclusive and has no end marker at all, so 4.x fails to
+  # compile in USB-MIDI.h and USB-MIDI_defs.h.
+  #
+  # 5.0.0 is co-authored by lathoub, who wrote the vendored USB-MIDI
+  # transport, so 5.x is the version that transport was written against.
+  MIDI_LIB_VERSION: 5.0.2
 
   SKETCH_DIR: firmware/AcidBox
 
@@ -122,11 +131,13 @@ jobs:
             --build-path "${{ runner.temp }}/build" \
             "$SKETCH_DIR" 2>&1 | tee build.log
 
-      - name: Report warnings and sketch size
+      - name: Report errors, warnings and sketch size
         if: always()
         run: |
-          echo "--- warning count ---"
-          grep -c 'warning:' build.log || echo 0
+          echo "--- errors ---"
+          grep -E '^[^ ]+:[0-9]+:[0-9]+: error:' build.log || echo "(none)"
+          echo "--- error count ---"
+          grep -cE ': error:' build.log || echo 0
           echo "--- warnings from our own sketch ---"
           grep 'warning:' build.log | grep -F "$SKETCH_DIR" || echo "(none)"
           echo "--- sketch size ---"
