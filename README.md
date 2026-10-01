@@ -5,9 +5,12 @@ DSP engine driving Acid Drip's 16-step sequencer, pad gestures, and TFT UI.
 
 > **Status: M0 — baseline builds.** The plan is complete and committed, the
 > AcidBox DSP layer is vendored at `firmware/AcidBox/`, and GitHub Actions
-> compiles it green (806 KB binary). On-hardware verification — flashing, audio,
-> core-0 headroom — is still outstanding, because no ESP32-S3 is currently
-> attached. M1 onward is unstarted.
+> compiles it green (616,724 bytes of a 1 MB app partition). CI also builds the
+> 2.55 MB LittleFS drum kit image from pinned upstream `data/`, so nothing has to
+> be installed locally. On-hardware verification — flashing, audio, core-0
+> headroom — is still outstanding, because no ESP32-S3 is currently attached.
+> M1 onward is unstarted. See **[HARDWARE_SETUP.md](HARDWARE_SETUP.md)** for the
+> wiring.
 
 ## The idea in one paragraph
 
@@ -41,8 +44,19 @@ Roughly 8–12 days of software work.
 ## Building
 
 Push to `main`, or run the **build** workflow. It installs arduino-cli and the
-ESP32 core, compiles the sketch, and uploads the `.bin` as an artifact. The
-toolchain is ~1.5 GB and cached between runs.
+ESP32 core, compiles the sketch, and uploads three artifacts:
+
+| artifact | what it is |
+|---|---|
+| `AcidDripS3-firmware` | `bootloader.bin`, `partitions.bin`, `boot_app0.bin`, `AcidBox.bin`, plus a ready-to-paste `flash-args.txt` |
+| `AcidDripS3-littlefs` | `littlefs.bin`, the drum kit image, built from upstream `data/` |
+| `build-log` | full compile output |
+
+The run page also prints both flash budgets (app partition, LittleFS
+partition), so a change that overspends shows up where it was made.
+
+The toolchain is ~1.5 GB and cached between runs. Nothing needs to be
+installed locally — see **[HARDWARE_SETUP.md](HARDWARE_SETUP.md)**.
 
 Target is `esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M`.
 See **[firmware/README.md](firmware/README.md)** for why each of those is the

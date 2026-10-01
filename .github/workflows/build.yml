@@ -248,11 +248,25 @@ jobs:
             exit 1
           fi
 
-          used=$(stat -c%s "$out/littlefs.bin")
-          echo "littlefs.bin              : $used bytes"
+          # mklittlefs always pads the image out to -s, so the image file is
+          # exactly FS_PARTITION_SIZE bytes no matter how full it really is.
+          # Its size therefore carries zero information about headroom -- the
+          # only honest measure is how many bytes of samples went in.
+          raw=$(find acidbox/data -type f -printf '%s\n' | awk '{t+=$1} END {print t+0}')
+          blocks=$(find acidbox/data -type f -printf '%s\n' \
+                   | awk -v b="$FS_BLOCK_SIZE" '{t += int(($1 + b - 1) / b) * b} END {print t+0}')
+          n=$(find acidbox/data -type f | wc -l)
+
+          echo "sample files              : $n"
+          echo "raw bytes                 : $raw"
+          echo "block-aligned bytes       : $blocks"
           echo "partition ($FS_PARTITION_LABEL): $FS_PARTITION_SIZE bytes"
-          echo "image headroom            : $((FS_PARTITION_SIZE - used)) bytes"
+          echo "nominal headroom          : $((FS_PARTITION_SIZE - blocks)) bytes (before FS metadata)"
           echo "image sha256              : $(sha256sum "$out/littlefs.bin" | cut -d' ' -f1)"
+
+          echo "FS_CONTENT_RAW=$raw"     >> "$GITHUB_ENV"
+          echo "FS_CONTENT_BLOCKS=$blocks" >> "$GITHUB_ENV"
+          echo "FS_FILE_COUNT=$n"         >> "$GITHUB_ENV"
 
       - name: Upload firmware binary
         if: success()
@@ -287,29 +301,35 @@ jobs:
           # the run page means a M1-M4 change that overspends shows up as a
           # number on the run that caused it, not three milestones later on
           # the bench.
-          build="${{ runner.temp }}/build"
-          fs="${{ runner.temp }}/littlefs/littlefs.bin"
+          # arduino-cli's own line is the authority for app size, so parse it
+          # rather than stat a file. The app binary is named after the *sketch*
+          # (firmware/AcidBox -> AcidBox.bin), not firmware.bin -- an earlier
+          # version of this step assumed the latter and reported
+          # "build failed" on a perfectly good build.
           app_max=1048576
+          app_used=$(grep -oE 'Sketch uses [0-9]+ bytes' build.log | grep -oE '[0-9]+' | head -1 || true)
 
           {
             echo "### Flash budgets"
             echo
             echo "| region | limit | used | free |"
             echo "|---|---|---|---|"
-            if [ -f "$build/firmware.bin" ]; then
-              used=$(stat -c%s "$build/firmware.bin")
-              echo "| app0 (noota_3g) | $app_max | $used | $((app_max - used)) |"
+            if [ -n "${app_used:-}" ]; then
+              echo "| app0 (noota_3g) | $app_max | $app_used | $((app_max - app_used)) |"
             else
               echo "| app0 (noota_3g) | $app_max | build failed | - |"
             fi
-            if [ -f "$fs" ]; then
-              used=$(stat -c%s "$fs")
-              echo "| $FS_PARTITION_LABEL (LittleFS) | $FS_PARTITION_SIZE | $used | $((FS_PARTITION_SIZE - used)) |"
+            if [ -n "${FS_CONTENT_BLOCKS:-}" ]; then
+              echo "| $FS_PARTITION_LABEL samples (LittleFS) | $FS_PARTITION_SIZE | $FS_CONTENT_BLOCKS | $((FS_PARTITION_SIZE - FS_CONTENT_BLOCKS)) |"
             else
-              echo "| $FS_PARTITION_LABEL (LittleFS) | $FS_PARTITION_SIZE | no image | - |"
+              echo "| $FS_PARTITION_LABEL samples (LittleFS) | $FS_PARTITION_SIZE | no image | - |"
             fi
             echo
-            echo "Sketch size as reported by arduino-cli:"
+            echo "LittleFS free is sample bytes only: mklittlefs pads littlefs.bin out to"
+            echo "the full $FS_PARTITION_SIZE bytes, so the image size itself never shrinks."
+            echo "The real figure also has to cover inodes and directory blocks, so treat"
+            echo "this as an upper bound."
+            echo
             echo '```'
             grep -E 'Sketch uses|Global variables' build.log || echo "(not in log)"
             echo '```'

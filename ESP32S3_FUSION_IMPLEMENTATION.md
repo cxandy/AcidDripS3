@@ -221,7 +221,8 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 **已确认的三件事**
 
 - **TinyUSB MIDI 是开启的。** `MIDIUSB_ESP32.h` 整个包在 `#if CONFIG_TINYUSB_MIDI_ENABLED` 里，为 0 时该类不存在，而 `USB-MIDI.h:84` 在 ESP32 上无条件调用 `MidiUSB.begin()`——编译能过，就证明该宏为 1。这条原本列为风险，现已闭环。
-- **固件 806 KB，装得进 1 MB 分区。** 剩余约 223 KB，M1–M4 的增量（音序器 + TFT + FX）需要留意这个余量。
+- **固件 616,724 字节（58%），装得进 1 MB 分区。** 剩余 431,852 字节。M1–M4 的增量（音序器 + TFT + FX）需要留意这个余量。
+  （此前这里写的"806 KB / 剩 223 KB"是错的：806 KB 是 GitHub **artifact 压缩包**的大小，不是固件大小。真实数字取自 arduino-cli 的 `Sketch uses`。）
 - **8 套鼓组（2.55 MB）装得进 3 MB LittleFS 分区。** 原本只是估计装得下，现在 CI 已经从锁定的上游 commit 构建出 `littlefs.bin` 并通过。这解除了 R4 的一半。
 
 **固件产物：CI 现在交付完整烧录包**

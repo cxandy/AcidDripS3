@@ -221,7 +221,9 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
 > `noota_3g.csv` 把 nsv 分成 0x5000（默认 0x4000），把 otadata 从 `0xd000` 顶到了 `0xe000`。
 > 写错就等于把 otadata 写进了空隙里。
 
-当前 `firmware.bin` ≈ 806 KB，对 1 MB 的 app0 分区还剩约 223 KB。M1 之后会陆续吃掉它。
+当前 `firmware.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
+（GitHub Actions 页面上 `AcidDripS3-firmware` artifact 显示的 806 KB 是**压缩包**大小，不是固件大小。）
+M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个余量。
 
 ---
 
