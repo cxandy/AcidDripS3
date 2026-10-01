@@ -69,12 +69,16 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 
 /* M0 diagnostics */
 #define M0_DIAG 1     // the M0 diagnostic block. Set to 0 to strip it.
-#define M0_DIAG_MS 2000  // report window in ms: peaks are measured, printed and the test
-                        // mode advanced once per this many. Cycles on its own because
-                        // this board (ESP32-S3-WROOM) exposes no spare pin to press:
-                        // GPIO23 exists on the chip and init_button() puts it in
-                        // INPUT_PULLUP, but here it reads LOW with nothing attached and
-                        // is not broken out.
+#define M0_DIAG_MS 500   // report window in ms: peaks are measured, printed and the test
+                        // mode advanced once per this many. A whole 3-mode cycle is
+                        // therefore 1.5 s, short enough that any capture taken from
+                        // setup onwards contains all three modes -- three earlier runs
+                        // were lost to the window being longer than the operator's
+                        // patience, and a diagnostic you have to time is a bad one.
+                        // Cycles on its own because this board (ESP32-S3-WROOM) exposes
+                        // no spare pin to press: GPIO23 exists on the chip and
+                        // init_button() puts it in INPUT_PULLUP, but here it reads LOW
+                        // with nothing attached and is not broken out.
 #if M0_DIAG
   // Which experiment is running, cycled from regular_checks() and read by mixer() and
   // by i2s_output(), so it is declared here rather than in AcidBox.ino.

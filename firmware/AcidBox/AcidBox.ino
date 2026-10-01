@@ -451,6 +451,19 @@ void jukebox_tick() {
 
 void regular_checks() {
   timer1_fired = false;
+
+#if M0_DIAG
+  // Counted first, before anything else in this function can misbehave, so that a
+  // rising loops= in the report proves loop() on core 1 is still running. Every other
+  // number in this diagnostic assumes it is, and that was never checked. Three runs
+  // produced no report line at all, and the question worth answering is whether this
+  // function is reached: jukebox_tick() -> run_tick() -> run_ui() all sit ahead of
+  // the reporting code, so a stall in any of them would be indistinguishable from
+  // silence on the wire. (Those three were audited and none of them blocks, but the
+  // counter settles it from the device rather than from reading the source.)
+  static uint32_t m0Loops = 0;
+  m0Loops++;
+#endif
   
 #ifdef MIDI_VIA_SERIAL
   MIDI.read();
@@ -485,16 +498,16 @@ void regular_checks() {
 #endif
 
 #if M0_DIAG
-  // M0: report the measured peaks, then flip the reverb bypass for the next window.
+  // M0: report the measured peaks, then advance to the next test mode.
   //
-  // This alternates on a timer instead of waiting for a button because the M0 wiring
-  // is a DAC cable and USB only. An earlier attempt switched on a momentary short of
-  // GPIO23; on this WROOM board that pin is not broken out and reads LOW regardless,
-  // so the bypass was stuck ON from the first loop and the experiment never ran.
+  // This cycles on a timer instead of waiting for a button because the M0 wiring is a
+  // DAC cable and USB only. An earlier attempt switched on a momentary short of GPIO23;
+  // on this WROOM board that pin is not broken out and reads LOW regardless, so the
+  // bypass was stuck ON from the first loop and the experiment never ran.
   //
-  // Two consecutive lines, one with bypass OFF and one with it ON, compare the reverb
-  // row and the out row directly: that settles whether the reverb is the noise without
-  // anyone having to judge loudness by ear.
+  // One pass through modes 0, 1, 2 is a complete experiment, and comparing the reverb
+  // row and the out row across them settles the reverb question without anyone having
+  // to judge loudness by ear.
   // The first report must NOT fire on the first loop(). m0LastReport used to start at
   // 0 while millis() is already past M0_DIAG_MS by the time setup() returns, so it
   // sampled immediately -- right after setup() zeroed every buffer to
@@ -503,14 +516,24 @@ void regular_checks() {
   // rather than the fault. Start the clock here so the first window is a real one.
   static uint32_t m0LastReport = 0;
   static bool     m0Clocked = false;
+  static bool     m0Legend = false;
   uint32_t m0NowMs = millis();
   if ( !m0Clocked ) { m0LastReport = m0NowMs; m0Clocked = true; }
   else if ( (uint32_t)(m0NowMs - m0LastReport) >= (uint32_t)M0_DIAG_MS ) {
     m0LastReport = m0NowMs;
-    // m0MixerCalls first: a rising count proves the audio task is alive, which
-    // separates "audio never ran" from "audio ran and was silent".
-    DEBF("[M0] mode=%u mixer=%u drums=%.4f synth1=%.4f synth2=%.4f delay=%.4f reverb=%.4f out=%.4f bad=%d\r\n",
-         (unsigned)m0Mode, (unsigned)m0MixerCalls,
+    // Say what the modes mean once, then never again. A log that arrives without the
+    // operator having read a commit message should still be readable on its own.
+    if ( !m0Legend ) {
+      m0Legend = true;
+      DEBF("[M0] modes cycle every %d ms: 0=normal 1=reverb bypassed 2=out_buf forced to 0\r\n",
+           (int)M0_DIAG_MS);
+    }
+    // m0Loops first: a rising count proves loop() on core 1 is alive, which separates
+    // "the reporting code never runs" from "it runs and the audio is quiet". m0MixerCalls
+    // second: a rising count proves the core-0 audio task is alive, which separates
+    // "audio never ran" from "audio ran and was silent".
+    DEBF("[M0] mode=%u loops=%u mixer=%u drums=%.4f synth1=%.4f synth2=%.4f delay=%.4f reverb=%.4f out=%.4f bad=%d\r\n",
+         (unsigned)m0Mode, (unsigned)m0Loops, (unsigned)m0MixerCalls,
          (double)m0pk_drums, (double)m0pk_synth1, (double)m0pk_synth2,
          (double)m0pk_delay, (double)m0pk_reverb, (double)m0pk_out,
          (int)m0Bad);
