@@ -106,6 +106,21 @@ void i2sDeinit() {
 
 static inline void i2s_output () {
 // now out_buf is ready, output
+#if M0_DIAG
+  if ( m0Mode == 2 ) {
+    // M0: write a buffer we know is silent, changing nothing else. If the DAC still
+    // makes noise, the fault is downstream of every sample in this program -- the
+    // I2S write itself, or the DAC module -- and none of the upstream investigation
+    // was ever going to find it. If it goes quiet, the noise is digital and the bus
+    // peaks above say which one.
+    for (int i = 0; i < DMA_BUF_LEN; i++) {
+      out_buf[current_out_buf]._signed[i*2]   = 0;
+      out_buf[current_out_buf]._signed[i*2+1] = 0;
+    }
+    I2S.write((uint8_t*)out_buf[current_out_buf]._signed, sizeof(out_buf[current_out_buf]._signed));
+    return;
+  }
+#endif
   for (int i=0; i < DMA_BUF_LEN; i++) {
       out_buf[current_out_buf]._signed[i*2] = 0x7fff * (float)(( mix_buf_l[current_out_buf][i])) ; 
       out_buf[current_out_buf]._signed[i*2+1] = 0x7fff * (float)(( mix_buf_r[current_out_buf][i])) ;

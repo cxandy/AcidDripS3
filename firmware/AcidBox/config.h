@@ -69,13 +69,24 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 
 /* M0 diagnostics */
 #define M0_DIAG 1     // the M0 diagnostic block. Set to 0 to strip it.
-#define M0_DIAG_MS 3000  // report window: peaks are measured, printed and the reverb
-                        // bypass flipped once per this many milliseconds. Short enough
-                        // to A/B by ear, long enough to read. Alternates automatically
-                        // because this board (ESP32-S3-WROOM) exposes no spare pin:
+#define M0_DIAG_MS 2000  // report window in ms: peaks are measured, printed and the test
+                        // mode advanced once per this many. Cycles on its own because
+                        // this board (ESP32-S3-WROOM) exposes no spare pin to press:
                         // GPIO23 exists on the chip and init_button() puts it in
-                        // INPUT_PULLUP, but on this board it reads LOW with nothing
-                        // attached and is not broken out, so it cannot be a switch.
+                        // INPUT_PULLUP, but here it reads LOW with nothing attached and
+                        // is not broken out.
+#if M0_DIAG
+  // Which experiment is running, cycled from regular_checks() and read by mixer() and
+  // by i2s_output(), so it is declared here rather than in AcidBox.ino.
+  //
+  //   0  normal
+  //   1  reverb bypassed      is the reverb the noise?
+  //   2  out_buf forced to 0  is the noise in the digital signal at all, or does it
+  //                          survive a buffer we know is silent? That separates the
+  //                          I2S write and the DAC module from everything upstream.
+  extern volatile uint8_t m0Mode;
+  extern volatile uint32_t m0MixerCalls;   // proves the audio task is actually running
+#endif
 
 float bpm = 130.0f;
 

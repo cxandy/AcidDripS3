@@ -98,6 +98,8 @@ static int    ctrl_hold_notes;
 // It alternates on its own rather than waiting for a button: the M0 wiring is a DAC
 // cable and nothing else, and this WROOM board breaks out no spare pin to switch on.
 static volatile bool m0ReverbBypass = false;
+volatile uint8_t  m0Mode = 0;
+volatile uint32_t m0MixerCalls = 0;
 
 // Peak amplitude of each bus in mixer(), read and printed from regular_checks().
 // Written from the IRAM audio task, so plain stores only: no printing, and no libm
@@ -493,16 +495,28 @@ void regular_checks() {
   // Two consecutive lines, one with bypass OFF and one with it ON, compare the reverb
   // row and the out row directly: that settles whether the reverb is the noise without
   // anyone having to judge loudness by ear.
+  // The first report must NOT fire on the first loop(). m0LastReport used to start at
+  // 0 while millis() is already past M0_DIAG_MS by the time setup() returns, so it
+  // sampled immediately -- right after setup() zeroed every buffer to
+  // "silence while we haven't loaded anything reasonable", and before the audio task
+  // had produced a sample. Every bus duly read 0.0000, which measured the pre-roll
+  // rather than the fault. Start the clock here so the first window is a real one.
   static uint32_t m0LastReport = 0;
+  static bool     m0Clocked = false;
   uint32_t m0NowMs = millis();
-  if ( (uint32_t)(m0NowMs - m0LastReport) >= (uint32_t)M0_DIAG_MS ) {
+  if ( !m0Clocked ) { m0LastReport = m0NowMs; m0Clocked = true; }
+  else if ( (uint32_t)(m0NowMs - m0LastReport) >= (uint32_t)M0_DIAG_MS ) {
     m0LastReport = m0NowMs;
-    DEBF("[M0] peak bypass=%s drums=%.4f synth1=%.4f synth2=%.4f delay=%.4f reverb=%.4f out=%.4f bad=%d\r\n",
-         m0ReverbBypass ? "ON" : "OFF",
+    // m0MixerCalls first: a rising count proves the audio task is alive, which
+    // separates "audio never ran" from "audio ran and was silent".
+    DEBF("[M0] mode=%u mixer=%u drums=%.4f synth1=%.4f synth2=%.4f delay=%.4f reverb=%.4f out=%.4f bad=%d\r\n",
+         (unsigned)m0Mode, (unsigned)m0MixerCalls,
          (double)m0pk_drums, (double)m0pk_synth1, (double)m0pk_synth2,
          (double)m0pk_delay, (double)m0pk_reverb, (double)m0pk_out,
          (int)m0Bad);
-    m0ReverbBypass = !m0ReverbBypass;
+    m0Mode = (uint8_t)((m0Mode + 1u) % 3u);
+    m0ReverbBypass = (m0Mode == 1);
+    m0MixerCalls = 0;
     m0pk_drums = 0.0f;  m0pk_synth1 = 0.0f;  m0pk_synth2 = 0.0f;
     m0pk_delay = 0.0f;  m0pk_reverb = 0.0f;  m0pk_out = 0.0f;
     m0Bad = 0;
@@ -531,6 +545,9 @@ inline void IRAM_ATTR synth2_generate() {
 }
 
 void IRAM_ATTR mixer() { // sum buffers 
+#if M0_DIAG
+  m0MixerCalls++;
+#endif
 #ifdef DEBUG_MASTER_OUT
   static float meter = 0.0f;
 #endif
