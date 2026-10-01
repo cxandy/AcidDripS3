@@ -141,6 +141,25 @@ jobs:
       - name: Show resolved board options
         run: arduino-cli board details -b esp32:esp32:esp32s3
 
+      - name: Show how USBMode reaches Serial
+        # M0. config.h sets DEBUG_PORT = Serial, and on this board that only reaches
+        # the user if the core redirects Serial onto the CDC when USBMode=hwcdc.
+        # Compiling either way, so a green build does NOT prove the log will appear.
+        # Print the evidence from the exact pinned core instead of assuming it: if
+        # this run shows no "define Serial", then a silent log is a wiring/config
+        # fact rather than a mystery, and HWCDC is the fallback to wire up.
+        run: |
+          core=$(find ~/.arduino15/packages/esp32/hardware/esp32 -maxdepth 2 -name boards.txt -print -quit | xargs dirname)
+          echo "core root: ${core:-NOT FOUND}"
+          echo "--- esp32s3 USBMode menu entries ---"
+          grep -E '^esp32s3\.menu\.USBMode\.' "${core}/boards.txt" || echo "(no USBMode menu for esp32s3)"
+          echo "--- esp32s3 CDCOnBoot menu entries ---"
+          grep -E '^esp32s3\.menu\.CDCOnBoot\.' "${core}/boards.txt" || echo "(no CDCOnBoot menu for esp32s3)"
+          echo "--- where Serial is defined ---"
+          grep -rn 'define[[:space:]]\+Serial' "${core}/cores/esp32/" || echo "(no 'define Serial' in cores/esp32)"
+          echo "--- ARDUINO_USB_MODE guards ---"
+          grep -rn 'ARDUINO_USB_MODE' "${core}/cores/esp32/HWCDC.h" || echo "(HWCDC.h absent, or no ARDUINO_USB_MODE in it)"
+
       - name: Check TinyUSB MIDI is compiled in
         # MIDIUSB_ESP32.h is wrapped in #if CONFIG_TINYUSB_MIDI_ENABLED. If the
         # prebuilt sdkconfig has it off, the class disappears and
