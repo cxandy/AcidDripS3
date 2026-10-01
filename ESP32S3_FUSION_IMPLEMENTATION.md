@@ -218,10 +218,32 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 | `MIDI Library` 必须用 **5.x** | 4.x 的 `midi::MidiType` 只有 `SystemExclusive`，没有 `SystemExclusiveStart`/`End`，而 AcidBox vendored 的 `src/usbmidi` 依赖这两个名字，4.x **无法编译**。5.0.0 由 `lathoub`（vendored 传输层作者）共同署名，即其目标版本 |
 | Library Manager 里的名字是 `MIDI Library`，不是仓库名 `arduino_midi_library` | 直接写仓库名会装不上 |
 
-**已确认的两件事**
+**已确认的三件事**
 
 - **TinyUSB MIDI 是开启的。** `MIDIUSB_ESP32.h` 整个包在 `#if CONFIG_TINYUSB_MIDI_ENABLED` 里，为 0 时该类不存在，而 `USB-MIDI.h:84` 在 ESP32 上无条件调用 `MidiUSB.begin()`——编译能过，就证明该宏为 1。这条原本列为风险，现已闭环。
 - **固件 806 KB，装得进 1 MB 分区。** 剩余约 223 KB，M1–M4 的增量（音序器 + TFT + FX）需要留意这个余量。
+- **8 套鼓组（2.55 MB）装得进 3 MB LittleFS 分区。** 原本只是估计装得下，现在 CI 已经从锁定的上游 commit 构建出 `littlefs.bin` 并通过。这解除了 R4 的一半。
+
+**固件产物：CI 现在交付完整烧录包**
+
+早先的 artifact **缺 `boot_app0.bin`**——`--export-binaries` 只导出 bootloader/partitions/firmware，而 `boot_app0.bin` 住在 core 的 `tools/partitions/` 里，不会被复制。而 otadata 分区不初始化，加上网上教程普遍写的 `0xe0000` 对本分区表是错的（`noota_3g.csv` 把 nvs 分成 0x5000 而非默认 0x4000，otadata 因此从 `0xd000` 上移到 `0xe000`），这个坑迟早要踩。现在 CI 会：
+
+- 从 core 里复制出 `boot_app0.bin`，四个偏移量按 `platform.txt:349` 的上传配方写入 `flash-args.txt`（偏移量取自 platform.txt，不取自本文档或任何教程）
+- 用 `mklittlefs` 从上游 `data/` 构建 `littlefs.bin`（core 本身不带这个工具），装不下就让 build 变红
+- 把 app 分区与 LittleFS 分区两个余量写进 run 页面
+
+块大小 4096 不是随便填的：`LittleFSFS::begin()` 只设了 `grow_on_mount = true`，块大小走 IDF 默认值。不匹配的后果特别恶劣——`FORMAT_LITTLEFS_IF_FAILED` 是 `true`，镜像挂不上不会报错，而是**静默格式化分区**，鼓组退回 `samples.h` 里那套 8-bit 内嵌采样，听起来"能动"，但已经不是 808 采样了。
+
+LittleFS 的实际余量很紧，值得单独记一笔：
+
+```
+96 个文件，原始         2,673,230 字节
+4 KB 块对齐后          2,863,104 字节  （块对齐本身吃掉 189,874 字节）
+分区                   3,014,656 字节
+名义余量                 151,552 字节
+```
+
+余量只剩约 148 KB，而且还没扣 LittleFS 的 inode 表和目录块。实测能装下，但**后面每加一套鼓组都要重新跑一次 CI 确认**。真装不下时按这个顺序处理：先砍鼓组（kit 1 最大，0.5 MB，光 `101_BD8.wav` 就 175 KB），再考虑换 16 MB flash + 自定义分区表。
 
 **编译配置**
 
@@ -229,13 +251,15 @@ V5 的 DJ filter + drive 饱和比 AcidBox 的 `FxFilterCrusher` 更有表现力
 esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
 ```
 
-`PSRAM=opi` 是硬需求：`PRELOAD_ALL` 的 `PSRAM_SAMPLER_CACHE` 为 3 MB，QSPI 不够。`FlashSize=16M` 是推测值，需按实际板子确认。`USBMode`/`CDCOnBoot` 保持 Arduino 默认不指定，原因见 `firmware/README.md`。
+`PSRAM=opi` 是硬需求：`PRELOAD_ALL` 的 `PSRAM_SAMPLER_CACHE` 为 3 MB，QSPI 不够。`FlashSize=16M` 是推测值——不过 `noota_3g` 只用到 `0x400000`（4 MB），所以 8 MB flash 同样装得下，这个选项主要影响 esp-idf 写进镜像头的参数，功能上两者等价。`USBMode`/`CDCOnBoot` 保持 Arduino 默认不指定，原因见 `firmware/README.md`。
+
+**硬件接线已定稿**：见 `HARDWARE_SETUP.md`。I2S 是 GPIO 5/6/7；PSRAM 必须是 OPI 且 ≥ 4 MB（`PSRAM_SAMPLER_CACHE` 3 MB，**R2 版本的板子直接跑不起来**）；M0 不需要接任何按键或电位器。
 
 **仍未完成（阻塞于无硬件）**
 
 - 烧录与出声验证
 - `BENCH_AUDIO_HEADROOM` 仪表移植与 core 0 余量实测
-- LittleFS 镜像构建与上传（`data/` 2.5 MB，依赖 `noota_3g` 的 3 MB 分区）
+- 上板确认 USB MIDI 实际枚举，以及板子真实的 `FlashSize`
 
 本机无 ESP32-S3 在位：所有相关 PnP 条目（`VID_303A&PID_1001`、`USB-SERIAL CH340 (COM5)` 等）状态均为 Unknown，属残留记录，实际只有主板的 `COM1`。
 
@@ -369,9 +393,17 @@ AcidBox 现为 `xTaskCreatePinnedToCore(audio_task1, ..., 1, &SynthTask1, 0)`（
 
 ESP32 的 ADC2 与 WiFi 冲突，ADC3 已被 WiFi 占用。**只能用 ADC1（GPIO 1-10）**。3 个电位器须落在 GPIO 1-10 内。
 
-### R4 — LittleFS 上传流程（低）
+### R4 — LittleFS 上传流程（低，镜像已自动化）
 
-需 [esp32-littlefs-upload](https://github.com/earlephilhower/esp32-littlefs-upload) 上传 `data/`。分区方案须选 `No OTA (1MB APP / 3MB SPIFFS)`，与 config.h 的 `PSRAM_SAMPLER_CACHE` 3 MB 相配。
+分区方案 `noota_3g`（No OTA, 1 MB APP / 3 MB SPIFFS）与 `PSRAM_SAMPLER_CACHE` 的 3 MB 相配。
+
+镜像构建**已自动化**：CI 从锁定的上游 commit 浅克隆 `data/`，用 `mklittlefs` 4.1.0 构建 `littlefs.bin` 并作为独立 artifact `AcidDripS3-littlefs` 交付。core 本身不带 `mklittlefs`，这一步要自己下载预编译二进制。
+
+剩下的只有"上板刷镜像"这一下人工操作，偏移 `0x110000`。三个注意点：
+
+1. 分区表标签是 **`spiffs`**，不是 `littlefs`，工具参数要给对。
+2. 块大小必须 4096，与 `LittleFSFS::begin()` 的 IDF 默认值一致。
+3. `FORMAT_LITTLEFS_IF_FAILED` 是 `true`：**镜像挂不上不会报错，会静默格式化分区**。所以固件和镜像必须配套刷，症状是"鼓变 8-bit 了"而不是任何错误提示。
 
 ### R5 — 鼓机效果缺失（低，已接受）
 
