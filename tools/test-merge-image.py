@@ -14,8 +14,11 @@ Two bugs this caught, both of which would have shipped:
     rather than comment *rows* turned the header into a partition called Type
     at offset Size. Only visible because the nominal case asserts on content,
     not just on exit code.
-  * The app binary was assumed to be firmware.bin. arduino-cli names it after
-    the sketch, so it is AcidBox.bin. Hence find_app_bin().
+  * The app binary's name. Three wrong guesses in a row -- firmware.bin,
+    then AcidBox.bin, then AcidBox.ino.bin -- before reading the actual build
+    directory, which arduino-cli 1.5.1 names <sketch>.ino.<kind>.bin. The
+    bundle step now discovers it by suffix and normalises the name, and this
+    harness asserts on the normalised contract.
 """
 import os
 import pathlib
@@ -38,16 +41,22 @@ FILL = {
     "bootloader.bin": 0x8000,
     "partitions.bin": 0x1000,
     "boot_app0.bin": 0x2000,
-    "AcidBox.bin": 0x96000,       # 616724, the real app size
+    "firmware.bin": 0x96000,      # 616724, the real app size
 }
 LFS_SIZE = 0x2E0000              # full partition, as mklittlefs pads it
 FQBN = "esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M"
 OFFSETS = {"bootloader.bin": 0x0, "partitions.bin": 0x8000, "boot_app0.bin": 0xE000,
-           "AcidBox.bin": 0x10000, "littlefs.bin": 0x110000}
+           "firmware.bin": 0x10000, "littlefs.bin": 0x110000}
 
 
 def build_case(tmp, sizes=None, label="", expect_fail_sub=None, fqbn=FQBN,
-               csv_text=None, extra_bins=()):
+               csv_text=None, drop=None, ac_merged=None, ac_corrupt_at=None):
+    """One merge run against synthetic inputs.
+
+    drop          -- file the bundle step should have left but did not.
+    ac_merged     -- size of arduino-cli's own merged image, to cross-check.
+    ac_corrupt_at -- offset to get wrong in that image, to prove the check bites.
+    """
     sizes = FILL if sizes is None else sizes
     d = pathlib.Path(tmp)
     build = d / "build"
@@ -57,12 +66,24 @@ def build_case(tmp, sizes=None, label="", expect_fail_sub=None, fqbn=FQBN,
     pdir.mkdir(parents=True, exist_ok=True)
     build.mkdir(parents=True, exist_ok=True)
     (pdir / "noota_3g.csv").write_text(csv_text or CSV, encoding="utf-8")
+    data = {}
     for name, size in sizes.items():
-        (build / name).write_bytes(bytes((i * 7 + 3) & 0xFF for i in range(size)))
-    for name in extra_bins:
-        (build / name).write_bytes(b"\x00" * 16)
+        if name == drop:
+            continue
+        data[name] = bytes((i * 7 + 3) & 0xFF for i in range(size))
+        (build / name).write_bytes(data[name])
     (d / "littlefs.bin").write_bytes(
         bytes(range(256)) * (LFS_SIZE // 256) + b"\x00" * (LFS_SIZE % 256))
+
+    if ac_merged is not None:
+        ac = bytearray(b"\xff" * ac_merged)
+        for name, off in OFFSETS.items():
+            src = data.get(name)
+            if src and off + len(src) <= ac_merged:
+                ac[off:off + len(src)] = src
+        if ac_corrupt_at is not None:
+            ac[ac_corrupt_at] ^= 0xFF
+        (build / "arduino-cli-merged.bin").write_bytes(bytes(ac))
 
     r = subprocess.run(
         [sys.executable, str(SCRIPT), fqbn, str(d / "core"), str(build),
@@ -106,41 +127,38 @@ def build_case(tmp, sizes=None, label="", expect_fail_sub=None, fqbn=FQBN,
 results = [
     build_case(tempfile.mkdtemp(), label="nominal (real sizes)"),
     build_case(tempfile.mkdtemp(),
-               sizes=dict(FILL, **{"AcidBox.bin": 0x100001}),
+               sizes=dict(FILL, **{"firmware.bin": 0x100001}),
                label="app overruns app0 by 1 byte",
                expect_fail_sub="only 1048576 available"),
+    # Caught by the up-front check rather than mid-merge, which is the point
+    # of having it: a missing piece is reported before any image is written.
+    build_case(tempfile.mkdtemp(), drop="boot_app0.bin",
+               label="boot_app0.bin missing",
+               expect_fail_sub="missing from"),
+    build_case(tempfile.mkdtemp(), drop="firmware.bin",
+               label="firmware.bin missing from the build path",
+               expect_fail_sub="firmware.bin"),
+    build_case(tempfile.mkdtemp(),
+               label="FQBN with no PartitionScheme",
+               fqbn="esp32:esp32:esp32s3:PSRAM=opi",
+               expect_fail_sub="no PartitionScheme= in FQBN"),
+    build_case(tempfile.mkdtemp(),
+               label="scheme CSV absent from the core",
+               fqbn="esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=nosuch",
+               expect_fail_sub="nosuch.csv not found"),
+    build_case(tempfile.mkdtemp(),
+               label="FS_PARTITION_LABEL not in the CSV",
+               csv_text=CSV.replace("spiffs", "littlefs"),
+               expect_fail_sub="no partition labelled"),
+    # arduino-cli 1.5.1 + core 3.3.12 also emit their own 16 MiB merged image.
+    # Comparing our offsets against it is free proof they are the ones the
+    # toolchain used, and the second case shows the check actually bites.
+    build_case(tempfile.mkdtemp(), ac_merged=0x1000000,
+               label="offset cross-check against arduino-cli's own merge"),
+    build_case(tempfile.mkdtemp(), ac_merged=0x1000000, ac_corrupt_at=0x10000,
+               label="cross-check catches a wrong offset",
+               expect_fail_sub="offset cross-check failed"),
 ]
-
-miss = dict(FILL)
-del miss["boot_app0.bin"]
-results.append(build_case(tempfile.mkdtemp(), sizes=miss,
-                          label="boot_app0.bin missing",
-                          expect_fail_sub="boot_app0.bin missing"))
-
-results.append(build_case(tempfile.mkdtemp(),
-                          label="FQBN with no PartitionScheme",
-                          fqbn="esp32:esp32:esp32s3:PSRAM=opi",
-                          expect_fail_sub="no PartitionScheme= in FQBN"))
-
-results.append(build_case(tempfile.mkdtemp(),
-                          label="scheme CSV absent from the core",
-                          fqbn="esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=nosuch",
-                          expect_fail_sub="nosuch.csv not found"))
-
-results.append(build_case(tempfile.mkdtemp(),
-                          label="FS_PARTITION_LABEL not in the CSV",
-                          csv_text=CSV.replace("spiffs", "littlefs"),
-                          expect_fail_sub="no partition labelled"))
-
-results.append(build_case(tempfile.mkdtemp(),
-                          label="no application binary in the build path",
-                          sizes={k: v for k, v in FILL.items() if k != "AcidBox.bin"},
-                          expect_fail_sub="found none"))
-
-results.append(build_case(tempfile.mkdtemp(),
-                          label="two candidates for the app binary",
-                          extra_bins=("SomethingElse.bin",),
-                          expect_fail_sub="found ['AcidBox.bin', 'SomethingElse.bin']"))
 
 print("\n" + ("ALL PASS" if all(results) else "SOME FAILED"))
 sys.exit(0 if all(results) else 1)

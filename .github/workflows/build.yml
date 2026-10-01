@@ -195,46 +195,81 @@ jobs:
           cp "$boot_app0" "$build/boot_app0.bin"
           echo "boot_app0.bin: $boot_app0 ($(stat -c%s "$boot_app0") bytes)"
 
-          # The application binary is named after the sketch, so this is
-          # AcidBox.bin and not firmware.bin. Guessing wrong here writes a
-          # command line that fails for the user, which is a worse way to
-          # learn the name than a local ls. Whatever .bin is left in the build
-          # path once the three core files are accounted for is the app.
+          # What arduino-cli 1.5.1 + core 3.3.12 actually leaves in the build
+          # path, and why none of it can be hardcoded:
+          #
+          #   AcidBox.ino.bin             the application
+          #   AcidBox.ino.bootloader.bin  core-prefixed
+          #   AcidBox.ino.partitions.bin  core-prefixed
+          #   AcidBox.ino.merged.bin      16 MiB, arduino-cli's own merge
+          #
+          # So the app is AcidBox.ino.bin, not AcidBox.bin and not
+          # firmware.bin -- three wrong guesses in a row before reading the
+          # directory. Match on the suffix instead: the app is the one .bin
+          # that is not a bootloader, a partition table, a merged image or
+          # the otadata blob we just copied in.
+          shopt -s nullglob
           app_bins=()
           for f in "$build"/*.bin; do
             case "$(basename "$f")" in
-              bootloader.bin|partitions.bin|boot_app0.bin) ;;
+              boot_app0.bin|*.bootloader.bin|*.partitions.bin|*.merged.bin) ;;
               *) app_bins+=("$(basename "$f")") ;;
             esac
           done
+          shopt -u nullglob
           if [ "${#app_bins[@]}" -ne 1 ]; then
             echo "::error::expected exactly one application .bin in $build, found: ${app_bins[*]:-none}"
-            ls -l "$build"/*.bin
+            ls -l "$build"/*.bin || true
             exit 1
           fi
-          app_bin="${app_bins[0]}"
-          echo "APP_BIN=$app_bin" >> "$GITHUB_ENV"
-          echo "application binary: $app_bin ($(stat -c%s "$build/$app_bin") bytes)"
+          src_bin="${app_bins[0]}"
+
+          # Normalise all three to the names the docs and flash-args.txt use.
+          # arduino-cli's names are baked into the board's flash layout and
+          # are not what anyone should be typing; the artifact is.
+          for kind in bootloader partitions; do
+            hits=("$build"/*."$kind".bin)
+            if [ "${#hits[@]}" -ne 1 ]; then
+              echo "::error::expected exactly one .$kind.bin in $build, found: ${hits[*]:-none}"
+              ls -l "$build"/*.bin || true
+              exit 1
+            fi
+            mv "${hits[0]}" "$build/$kind.bin"
+          done
+          mv "$build/$src_bin" "$build/firmware.bin"
+          # The sketch-prefixed merged image is arduino-cli's own, sized to the
+          # whole 16 MiB of flash. The merge step builds a 4 MiB one and uses
+          # this to confirm its offsets. Kept out of the artifact: it is 4x
+          # the download for no benefit to whoever is flashing.
+          merged_src=("$build"/*.merged.bin)
+          if [ "${#merged_src[@]}" -eq 1 ]; then
+            mv "${merged_src[0]}" "$build/arduino-cli-merged.bin"
+          else
+            echo "::warning::no arduino-cli merged image to cross-check offsets against"
+          fi
+          echo "application binary: $src_bin -> firmware.bin ($(stat -c%s "$build/firmware.bin") bytes)"
 
           # Offsets below match tools.esptool_py.upload.pattern_args in the
           # core's platform.txt, which is the authority -- not this comment.
-          # Unquoted heredoc so $app_bin lands in the pasted command.
-          cat > "$build/flash-args.txt" <<EOF
+          cat > "$build/flash-args.txt" <<'EOF'
           Replace <COM> with your port, e.g. COM5. Install esptool with:
             pip install esptool
           The core pins esptool 5.3.1, so subcommands are hyphenated.
-          Use \`python -m esptool\` so the entry-point name does not matter.
+          Use `python -m esptool` so the entry-point name does not matter.
 
-          python -m esptool --chip esp32s3 --port <COM> --baud 921600 \\
-            --before default-reset --after hard-reset \\
-            write-flash --flash-mode keep --flash-freq keep --flash-size keep \\
-            0x0 bootloader.bin 0x8000 partitions.bin \\
-            0xe000 boot_app0.bin 0x10000 $app_bin
+          python -m esptool --chip esp32s3 --port <COM> --baud 921600 \
+            --before default-reset --after hard-reset \
+            write-flash --flash-mode keep --flash-freq keep --flash-size keep \
+            0x0 bootloader.bin 0x8000 partitions.bin \
+            0xe000 boot_app0.bin 0x10000 firmware.bin
           EOF
 
           # Checksums so the download can be verified. Windows has certutil,
           # macOS/Linux have shasum, so this needs no extra tooling either way.
-          ( cd "$build" && sha256sum ./*.bin > SHA256SUMS.txt )
+          # The 16 MiB cross-check image is left out: it is not in the
+          # artifact, so a checksum for it would send people looking for it.
+          ( cd "$build" && sha256sum bootloader.bin partitions.bin \
+                           boot_app0.bin firmware.bin > SHA256SUMS.txt )
 
           ls -l "$build"/*.bin "$build"/*.txt
 
@@ -333,6 +368,9 @@ jobs:
           # and a find over the whole core tree -- three ways to fail for
           # reasons that never reach the log as anything readable.
           #
+          # The four file names are the normalised ones the bundle step
+          # settled on, so there is nothing to rediscover here.
+          #
           # It also means every diagnostic has to go to STDOUT. GitHub only
           # turns ::error:: lines on stdout into annotations on the commit
           # page; the same text on stderr is just "Process completed with
@@ -344,7 +382,6 @@ jobs:
                    "${{ runner.temp }}/build" \
                    "${{ runner.temp }}/littlefs/littlefs.bin" \
                    "${{ runner.temp }}/merged/merged.bin" > merge-report.md
-
           cat merge-report.md
           {
             echo "### One-file flash image"
@@ -372,9 +409,14 @@ jobs:
           # command line and SHA256SUMS.txt verifies the download. An
           # earlier version globbed only *.bin and quietly shipped neither,
           # while the docs promised flash-args.txt was in there.
+          #
+          # arduino-cli-merged.bin is excluded: it is arduino-cli's own
+          # 16 MiB whole-flash image, kept only so the merge step can confirm
+          # its offsets. Nobody needs to download it.
           path: |
             ${{ runner.temp }}/build/*.bin
             ${{ runner.temp }}/build/*.txt
+            !${{ runner.temp }}/build/arduino-cli-merged.bin
           if-no-files-found: error
 
       - name: Upload LittleFS image

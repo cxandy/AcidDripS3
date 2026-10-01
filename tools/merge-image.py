@@ -38,28 +38,6 @@ def num(s):
     return int(s.strip(), 0)
 
 
-def find_app_bin(build_dir):
-    """The application binary, found rather than assumed.
-
-    arduino-cli names it after the sketch, so firmware/AcidBox/AcidBox.ino
-    produces AcidBox.bin. Assuming "firmware.bin" looks harmless and is
-    wrong the moment the sketch is renamed -- and it fails as a missing file
-    in a merged image, which is a confusing way to be told you got the name
-    wrong.
-    """
-    found = sorted(
-        os.path.basename(p)
-        for p in glob.glob(os.path.join(build_dir, "*.bin"))
-        if os.path.basename(p) not in KNOWN_BINS
-    )
-    if len(found) != 1:
-        die(
-            f"expected exactly one application .bin in {build_dir}, found "
-            f"{found or 'none'}; known core files are {list(KNOWN_BINS)}"
-        )
-    return found[0]
-
-
 def read_parts(csv_path):
     parts = []
     with open(csv_path, newline="") as fh:
@@ -121,7 +99,16 @@ def main():
     ota_off = by_name["otadata"][1]
     total = max(o + s for _n, o, s in parts)
 
-    app_bin = find_app_bin(build_dir)
+    # The bundle step has already normalised arduino-cli's sketch-prefixed
+    # names to these four, and it is the only place that has looked at the
+    # build directory. So the contract is these names, not a guess here.
+    app_bin = "firmware.bin"
+    missing = [n for n in ("bootloader.bin", "partitions.bin", "boot_app0.bin",
+                           app_bin) if not os.path.exists(os.path.join(build_dir, n))]
+    if missing:
+        die(f"missing from {build_dir}: {', '.join(missing)}; the bundle step "
+            f"should have left bootloader.bin, partitions.bin, boot_app0.bin "
+            f"and {app_bin} there")
 
     def path_of(name):
         return fs_path if name == "littlefs.bin" else os.path.join(build_dir, name)
@@ -174,6 +161,35 @@ def main():
         end = off + len(data)
         if check[off:end] != data:
             die(f"verify failed: {name} != merged[0x{off:x}:]")
+
+    # arduino-cli 1.5.1 emits its own merged image alongside the pieces, sized
+    # to the whole flash. Comparing the regions we care about is a free,
+    # independent check that the offsets parsed out of the CSV are the ones
+    # the toolchain itself used -- the 0xe000 vs 0xe0000 trap would show up
+    # here rather than as a silently unbootable board on the bench.
+    ac = os.path.join(build_dir, "arduino-cli-merged.bin")
+    if os.path.exists(ac):
+        size = os.path.getsize(ac)
+        print(f"cross-check against arduino-cli's own {size}-byte merged image:")
+        with open(ac, "rb") as fh:
+            ref = fh.read()
+        for name, off in pieces:
+            if name == "littlefs.bin":
+                continue  # ours alone; the core has no filesystem image
+            with open(path_of(name), "rb") as fh:
+                data = fh.read()
+            if off + len(data) > size:
+                die(f"arduino-cli merged image is only {size} bytes; "
+                    f"{name} at 0x{off:x} does not fit inside it")
+            if ref[off:off + len(data)] != data:
+                die(
+                    f"offset cross-check failed: {name} at 0x{off:x} differs "
+                    f"from arduino-cli's merged image. The CSV offsets and the "
+                    f"offsets the build actually used are not the same thing."
+                )
+            print(f"  {name:18} @0x{off:06x} agrees")
+    else:
+        print("cross-check skipped: no arduino-cli-merged.bin to compare against")
 
     print(
         f"| **merged.bin** | **0x0** | **{total}** | "

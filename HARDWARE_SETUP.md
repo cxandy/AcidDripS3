@@ -177,7 +177,7 @@ GND              ──►  GND
 | artifact | 内容 | 什么时候用 |
 |---|---|---|
 | **`AcidDripS3-merged`** | **`merged.bin`（4 MiB，一个文件）+ `README.md`** | **平时就用它，见 §5.5** |
-| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`AcidBox.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` | 要单独重刷某一块，或想在命令行里刷 |
+| `AcidDripS3-firmware` | `bootloader.bin`、`partitions.bin`、`firmware.bin`、`boot_app0.bin`、`flash-args.txt`、`SHA256SUMS.txt` | 要单独重刷某一块，或想在命令行里刷 |
 | `AcidDripS3-littlefs` | `littlefs.bin`（鼓组音色原始镜像，见 §6） | 同上 |
 
 `--export-binaries` 会把三个 `.bin` 放进构建目录；`boot_app0.bin` 来自 core 内部的
@@ -206,13 +206,17 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
   --before default-reset --after hard-reset `
   write-flash --flash-mode keep --flash-freq keep --flash-size keep `
   0x0 bootloader.bin 0x8000 partitions.bin `
-  0xe000 boot_app0.bin 0x10000 AcidBox.bin
+  0xe000 boot_app0.bin 0x10000 firmware.bin
 ```
 
-应用固件叫 **`AcidBox.bin`**，不叫 `firmware.bin` —— arduino-cli 用**工程（sketch）名**
-给产物命名，`firmware/AcidBox/AcidBox.ino` 就编出 `AcidBox.bin`。CI 不会去猜这个文件名：
-它把构建目录里三个已知文件（`bootloader.bin` / `partitions.bin` / `boot_app0.bin`）
-排除后剩下的那个 `.bin` 就是应用，名字自动填进 `flash-args.txt`。改工程名也不会坏。
+arduino-cli 原始产物叫 **`AcidBox.ino.bin`**（用工程文件名 `<名字>.ino.<类型>.bin` 命名，
+所以还有 `AcidBox.ino.bootloader.bin`、`AcidBox.ino.partitions.bin`），
+**不是** `AcidBox.bin`，也不是 `firmware.bin` —— 这两个都试过，都不在 artifact 里。
+
+CI 会把这三个**统一改名**成 `bootloader.bin` / `partitions.bin` / `firmware.bin`，
+所以本文档和 `flash-args.txt` 里的名字是稳定的，跟 arduino-cli 的命名规则解耦。
+改名是按后缀找的（排除 `*.bootloader.bin`、`*.partitions.bin`、`*.merged.bin` 和
+`boot_app0.bin`），不是写死某个名字，所以改工程名也不会坏；找不到唯一候选时直接报错并列出候选。
 
 对应的偏移表（来自 core 的 `platform.txt:349` 上传配方 + `noota_3g.csv`）：
 
@@ -221,7 +225,7 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
 | `0x0` | `bootloader.bin` | — |
 | `0x8000` | `partitions.bin` | — |
 | `0xe000` | `boot_app0.bin` | 8 KB |
-| `0x10000` | `AcidBox.bin` | **1 MB（`upload.maximum_size=1048576`）** |
+| `0x10000` | `firmware.bin` | **1 MB（`upload.maximum_size=1048576`）** |
 
 `--baud` 460800 也很稳，线不好就降。
 
@@ -229,7 +233,7 @@ python -m esptool --chip esp32s3 --port COM5 --baud 921600 `
 > `noota_3g.csv` 把 nsv 分成 0x5000（默认 0x4000），把 otadata 从 `0xd000` 顶到了 `0xe000`。
 > 写错就等于把 otadata 写进了空隙里。
 
-当前 `AcidBox.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
+当前 `firmware.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
 （GitHub Actions 页面上 `AcidDripS3-firmware` artifact 显示的 806 KB 是**压缩包**大小，不是固件大小。）
 M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个余量。
 
@@ -255,8 +259,12 @@ coredump    0x3F0000
 缝隙全部填 `0xFF`，也就是"已擦除"的 flash 状态，和刚出厂一样。
 
 偏移量不是写死在 CI 里的，是**从 core 自己的 `noota_3g.csv` 解析出来的**
-（`PARTITION_SCHEME` 这个环境变量同时喂给 FQBN，两边不会打架）。
-换分区方案它会自己跟着变——`0xe000` / `0xe0000` 那种坑就是这么躲掉的。
+（方案名从 FQBN 的 `PartitionScheme=` 里读，也就是 arduino-cli 真正编译用的那个值，
+所以两边不会打架）。换分区方案它会自己跟着变——`0xe000` / `0xe0000` 那种坑就是这么躲掉的。
+
+另外 CI 会拿 arduino-cli **自己**生成的整片合并镜像（16 MiB）**逐块比对** bootloader、
+分区表、otadata、app 这四段在对应偏移上的字节。解析出来的偏移和工具链实际用的偏移
+要是不一致，构建会直接失败，而不是等刷到板子上发现开不了机。
 
 | Flash Address | File |
 |---|---|
@@ -289,7 +297,7 @@ flash size / mode / freq 写进镜像头里了，工具再改一遍只会引入�
 | `0x0` | `bootloader.bin` | `AcidDripS3-firmware` |
 | `0x8000` | `partitions.bin` | `AcidDripS3-firmware` |
 | `0xe000` | `boot_app0.bin` | `AcidDripS3-firmware` |
-| `0x10000` | `AcidBox.bin` | `AcidDripS3-firmware` |
+| `0x10000` | `firmware.bin` | `AcidDripS3-firmware` |
 | `0x110000` | `littlefs.bin` | `AcidDripS3-littlefs` |
 
 命令行版本见 §5.4 的 `flash-args.txt` 和 §6 的第二条命令。

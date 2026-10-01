@@ -44,3 +44,5 @@ desktop.ini
 *.pem
 *.key
 !*.pub
+__pycache__/
+*.pyc
