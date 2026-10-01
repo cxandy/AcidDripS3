@@ -16,10 +16,14 @@
 //#define FLASH_LED               // flash built-in LED
 //#define LOLIN_RGB               // Flashes the LOLIN S3 built-in RGB-LED
 
-// M0: was "#define DEBUG_ON". The author's own note says to turn it off for
-// production, and the mechanism he added for that (line ~145) does not work --
-// see the #undef block below.
-////#define DEBUG_ON            // note that debugging eats ticks initially belonging to real-time tasks, so sound output will be spoild in most cases, turn it off for production build
+// M0: DEBUG_ON is back on. The bench symptom (one drum hit, then noise) has three
+// candidate causes that are indistinguishable by ear, and the author's own note is
+// that debugging "eats ticks initially belonging to real-time tasks" -- acceptable
+// while diagnosing, not for production. Turn it back off once the cause is known.
+//
+// DEBUG_SAMPLER is deliberately left off: it prints per-sample lines from
+// Sampler::Init and would drown the numbers we actually want.
+#define DEBUG_ON              // note that debugging eats ticks initially belonging to real-time tasks, so sound output will be spoild in most cases, turn it off for production build
 //#define DEBUG_MASTER_OUT      // serial monitor plotter will draw the output waveform
 //#define DEBUG_SAMPLER
 //#define DEBUG_SYNTH
@@ -28,9 +32,19 @@
 //#define DEBUG_TIMING
 //#define DEBUG_MIDI
 
-#define MIDI_USB_DEVICE                     // use this option if you want to operate via USB with the sampler seen as a MIDI device (-50 kBytes of available RAM)
+// M0: MIDI_USB_DEVICE off, USB MIDI temporarily sacrificed for the debug log.
+//
+// This board has only the native USB-OTG port, no USB-UART bridge, so DEBUG_PORT
+// (= Serial = UART0 on GPIO43/44) has no bridge to reach. Moving the port to
+// USBMode=hwcdc in the FQBN is the only way to get the log out of the one cable.
+//
+// On ESP32-S3 the USB-Serial-JTAG and USB-OTG peripherals share GPIO19/20 and one
+// PHY, so they are mutually exclusive: a CDC console and TinyUSB MIDI cannot both
+// run on that port. USB MIDI returns when a CP2102/CH343 USB-TTL module is added
+// on GPIO43/44, which is the permanent fix and needs no FQBN change.
+//#define MIDI_USB_DEVICE       // use this option if you want to operate via USB with the sampler seen as a MIDI device (-50 kBytes of available RAM)
 // #define MIDI_VIA_SERIAL       // use this option to enable Hairless MIDI on Serial port @115200 baud (USB connector), THIS WILL BLOCK SERIAL DEBUGGING as well
-//#define MIDI_VIA_SERIAL2        // use this option if you want to operate by standard MIDI @31250baud, UART2 (Serial2), 
+//#define MIDI_VIA_SERIAL2        // use this option if you want to operate by standard MIDI @31250baud, UART2 (Serial2),
 
 #define MIDIRX_PIN      4       // this pin is used for input when MIDI_VIA_SERIAL2 defined (note that default pin 17 won't work with PSRAM)
 #define MIDITX_PIN      15      // this pin will be used for output (not implemented yet) when MIDI_VIA_SERIAL2 defined
@@ -160,6 +174,11 @@ const float  NORM_RADIANS = ONE_DIV_TWOPI * TABLE_SIZE;
 // directive", so this only ever tested MIDI_VIA_SERIAL. Since MIDI_VIA_SERIAL
 // is disabled by default, DEBUG_ON survived even with MIDI_USB_DEVICE enabled.
 // Rewritten in the same style as the guard in AcidBox.ino:36.
+//
+// Left as-is. With both MIDI_USB_DEVICE and MIDI_VIA_SERIAL currently off this is
+// inert, which is why enabling DEBUG_ON above works without editing this block.
+// Re-enabling USB MIDI will silence the log again -- that is the intended
+// behaviour of the author's guard, not a bug to work around.
 #if defined(MIDI_VIA_SERIAL) || defined(MIDI_USB_DEVICE)
   #undef DEBUG_ON
 #endif

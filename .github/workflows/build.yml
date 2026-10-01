@@ -73,11 +73,20 @@ env:
   #                      wrong fails silently -- it compiles, it just cannot
   #                      hold the 2.5 MB of drum kits.
   #   FlashSize=16M      Flash size of the target board. Raise if yours differs.
+  #   USBMode=hwcdc      M0, and hardware-driven rather than chosen. The bench board
+  #                      exposes only the native USB-OTG port, with no USB-UART bridge,
+  #                      so config.h's DEBUG_PORT (= Serial = UART0 on GPIO43/44) has
+  #                      nothing to reach. hwcdc puts a CDC console on that port so the
+  #                      one cable carries the log. Costs USB MIDI: on ESP32-S3 the
+  #                      USB-Serial-JTAG and USB-OTG peripherals share GPIO19/20 and a
+  #                      single PHY, so a CDC console and TinyUSB MIDI cannot coexist
+  #                      there. MIDI_USB_DEVICE is off in config.h to match. Drop both
+  #                      once a CP2102/CH343 module is wired to GPIO43/44.
   # The merged-image step parses PartitionScheme= out of this FQBN to find the
   # core's partition CSV, then derives every flash offset from that CSV. So the
   # FQBN stays the single source of truth: change the scheme here and the merge
   # follows, with nothing to keep in sync by hand.
-  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M
+  FQBN: esp32:esp32:esp32s3:PSRAM=opi,PartitionScheme=noota_3g,FlashSize=16M,USBMode=hwcdc
 
 jobs:
   build:
