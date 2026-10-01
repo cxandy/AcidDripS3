@@ -444,13 +444,21 @@ jobs:
           # the run page means a M1-M4 change that overspends shows up as a
           # number on the run that caused it, not three milestones later on
           # the bench.
-          # arduino-cli's own line is the authority for app size, so parse it
-          # rather than stat a file. The app binary is named after the *sketch*
-          # (firmware/AcidBox -> AcidBox.bin), not firmware.bin -- an earlier
-          # version of this step assumed the latter and reported
-          # "build failed" on a perfectly good build.
+          # arduino-cli's "Sketch uses N bytes" counts the sketch, not the
+          # image: the .bin also carries the image header and segment padding,
+          # and comes out ~156 bytes larger. Only the .bin size decides whether
+          # app0 overflows, so budget against the file and keep arduino's
+          # number as a second column rather than quietly reporting the
+          # smaller one. Parsed from the log because this step runs on failure
+          # too, when there is no file to stat.
           app_max=1048576
-          app_used=$(grep -oE 'Sketch uses [0-9]+ bytes' build.log | grep -oE '[0-9]+' | head -1 || true)
+          app_sketch=$(grep -oE 'Sketch uses [0-9]+ bytes' build.log | grep -oE '[0-9]+' | head -1 || true)
+          app_bin="${{ runner.temp }}/build/firmware.bin"
+          if [ -f "$app_bin" ]; then
+            app_used=$(stat -c%s "$app_bin")
+          else
+            app_used="$app_sketch"
+          fi
 
           {
             echo "### Flash budgets"
@@ -466,6 +474,13 @@ jobs:
               echo "| $FS_PARTITION_LABEL samples (LittleFS) | $FS_PARTITION_SIZE | $FS_CONTENT_BLOCKS | $((FS_PARTITION_SIZE - FS_CONTENT_BLOCKS)) |"
             else
               echo "| $FS_PARTITION_LABEL samples (LittleFS) | $FS_PARTITION_SIZE | no image | - |"
+            fi
+            echo
+            echo "app0 used is the size of firmware.bin, which is what has to fit."
+            if [ -n "${app_sketch:-}" ] && [ "${app_sketch:-}" != "${app_used:-}" ]; then
+              echo "arduino-cli separately reports \"Sketch uses $app_sketch bytes\"; the"
+              echo "$((app_used - app_sketch))-byte difference is the image header and"
+              echo "segment padding, and it is the larger number that has to fit."
             fi
             echo
             echo "LittleFS free is sample bytes only: mklittlefs pads littlefs.bin out to"
@@ -485,6 +500,13 @@ jobs:
             if [ -d "$bundle" ]; then
               for f in "$bundle"/*.bin "$bundle"/*.txt; do
                 [ -e "$f" ] || continue
+                # arduino-cli-merged.bin stays in the build dir so the merge
+                # step can cross-check offsets against it, but the artifact
+                # excludes it. Listing it here would send people hunting for a
+                # file the download does not contain.
+                case "$(basename "$f")" in
+                  arduino-cli-merged.bin) continue ;;
+                esac
                 echo "| $(basename "$f") | $(stat -c%s "$f") | $(sha256sum "$f" | cut -c1-16) |"
               done
             else
@@ -494,5 +516,6 @@ jobs:
             echo "Sizes here are real bytes, not the compressed artifact size."
             echo "Browser flashing needs bootloader + partitions + boot_app0 + firmware"
             echo "at 0x0 / 0x8000 / 0xe000 / 0x10000, plus littlefs.bin at 0x110000"
-            echo "from the other artifact."
+            echo "from the other artifact -- or just the single 4 MiB merged.bin"
+            echo "at 0x0, which already contains all of them."
           } >> "$GITHUB_STEP_SUMMARY"

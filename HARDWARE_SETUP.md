@@ -233,8 +233,12 @@ CI 会把这三个**统一改名**成 `bootloader.bin` / `partitions.bin` / `fir
 > `noota_3g.csv` 把 nsv 分成 0x5000（默认 0x4000），把 otadata 从 `0xd000` 顶到了 `0xe000`。
 > 写错就等于把 otadata 写进了空隙里。
 
-当前 `firmware.bin` 是 616,724 字节，对 1 MB 的 app0 分区还剩 **431,852 字节**。
-（GitHub Actions 页面上 `AcidDripS3-firmware` artifact 显示的 806 KB 是**压缩包**大小，不是固件大小。）
+当前 `firmware.bin` 是 **616,880** 字节，对 1 MB 的 app0 分区还剩 **431,696** 字节。
+
+> arduino-cli 自己报的是 `Sketch uses 616724 bytes (58%)` —— 差 **156** 字节，
+> 那是 image header 和段对齐填充。**能不能装下看的是大的那个数**，所以 CI 的
+> 余量表以 `firmware.bin` 的实际大小为准，并把 arduino 那个数单列出来对照。
+> （`AcidDripS3-firmware` artifact 显示的 396 KB 是**压缩包**大小，也不是固件大小。）
 M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个余量。
 
 ### 5.5 完全不装软件：浏览器烧写
