@@ -3,14 +3,16 @@
 Fusion of two open synth projects into one ESP32-S3 firmware: AcidBox's 303-class
 DSP engine driving Acid Drip's 16-step sequencer, pad gestures, and TFT UI.
 
-> **Status: M0 — baseline builds.** The plan is complete and committed, the
-> AcidBox DSP layer is vendored at `firmware/AcidBox/`, and GitHub Actions
-> compiles it green (616,724 bytes of a 1 MB app partition). CI also builds the
-> 2.55 MB LittleFS drum kit image from pinned upstream `data/`, so nothing has to
-> be installed locally. On-hardware verification — flashing, audio, core-0
-> headroom — is still outstanding, because no ESP32-S3 is currently attached.
+> **Status: M0 — software complete, waiting on hardware.** The plan is committed,
+> the AcidBox DSP layer is vendored at `firmware/AcidBox/`, and GitHub Actions
+> compiles it green: 616,880 bytes in a 1 MB app partition, 2.55 MB of drum kits
+> in the 3 MB LittleFS partition, and a single 4 MiB `merged.bin` that flashes
+> at `0x0` in one step. Its offsets are cross-checked against arduino-cli's own
+> merged image rather than assumed. On-hardware verification — flashing, audio,
+> core-0 headroom — is outstanding, because no ESP32-S3 is currently attached.
 > M1 onward is unstarted. See **[HARDWARE_SETUP.md](HARDWARE_SETUP.md)** for the
-> wiring.
+> wiring, and **[HANDOFF.md](HANDOFF.md)** for current state, the traps, and
+> what to do next.
 
 ## The idea in one paragraph
 
