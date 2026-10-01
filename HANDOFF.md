@@ -5,39 +5,37 @@
 设计决策在 `ESP32S3_FUSION_IMPLEMENTATION.md`，本文**不重复**那些，只写四样别处
 没有的东西：验证过的事实、踩过的坑、当前的阻塞、下一步。
 
-最后更新：M0，`c8a8719`，CI 全绿（run #14）。
+最后更新：`dbd9993`，CI 全绿。**M0 结束**：上电爆音+持续噪音已定位并修复，
+`M0_DIAG` 已置 0，诊断开关原样保留。见 §7。
 
 ---
 
 ## 1. 一句话状态
 
-软件侧 M0 全部完成并通过 CI 验证。**M0 剩下的全部是物理工作，不接板子无法验收。**
+板子已接上、已刷机、**噪音已消失**——`dbd9993` 是出货构建：`M0_DIAG 0`（无强制静音、
+无峰值跟踪），诊断工具链原样保留在开关后面，`DEBUG_ON` 开着。
+软件侧没有已知阻塞；下一步是 §6 的四项。
 
 ---
 
 ## 2. 新机器上怎么把环境恢复出来
 
-### 2.1 必须手动搬的一样东西：SSH 私钥
+### 2.1 不再需要 SSH 私钥
 
-仓库是私有的，远程是 `git@github.com:cxandy/AcidDripS3.git`（SSH，非 HTTPS）。
-私钥在 `~/.ssh/zlyb_id_rsa`，**不在 git 里，也不会在任何 artifact 里**。换机必须
-自己带过去，并且 `~/.ssh/config` 要有：
+仓库**已经改成公开**（`gh repo edit --visibility public`）。原因：GitHub Actions 对
+私有仓库要收 billing，公开之后 CI 直接可用。
 
-```
-Host github.com
-    HostName github.com
-    User git
-    IdentityFile ~/.ssh/zlyb_id_rsa
-    IdentitiesOnly yes
-```
+remote 仍然是 **HTTPS**：`https://github.com/cxandy/AcidDripS3`。
+本节早先写的"私钥在 `~/.ssh/zlyb_id_rsa`、remote 写死 SSH"**已经不成立**——
+那段是私有仓库时代的残留。HTTPS 免密钥，两条路都能用。
 
-没有这把钥匙就只有两条路：重新在 GitHub 上加一把 deploy key，或者改用 HTTPS +
-PAT。前者更省事，因为 remote 已经写死了 SSH 地址。
+> 尚未决定：是否把 remote 换回 SSH。HANDOFF 旧版说 SSH，实际是 HTTPS。换不换都行，
+> 现在不影响任何事。
 
 ### 2.2 仓库
 
 ```powershell
-git clone git@github.com:cxandy/AcidDripS3.git
+git clone https://github.com/cxandy/AcidDripS3.git
 ```
 
 工作区干净，无 stash，无未推送提交。
@@ -164,13 +162,19 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 
 ## 5. 当前的阻塞
 
-| 阻塞 | 说明 |
-|---|---|
-| **没有 ESP32-S3 板子** | M0 剩余项全部卡在这里。必须 **N8R8 或 N16R8**——R2 跑不了（`PSRAM_SAMPLER_CACHE` 是 3 MB） |
-| 本机不能编译 | 见 §2.4。不是问题，是既定事实 |
+**没有硬阻塞。** 板子在手、CI 全绿、噪音已修。剩下的是待办和待确认项：
 
-设备管理器里 `USB JTAG/serial debug unit`、`COM5`（CH340）、
-`VID_303A&PID_1001` 全是 `Status = Unknown`，即残留记录。目前只有 `COM1` 是活的。
+| 项 | 状态 |
+|---|---|
+| 本机不能编译 | 见 §2.4。不是问题，是既定事实 |
+| `BENCH_AUDIO_HEADROOM` 未做 | core-0 实际余量还是"我记得好像够"。**建议在 M1 之前量** |
+| remote 用 HTTPS 还是 SSH | 无所谓，见 §2.1 的说明 |
+| `HARDWARE_SETUP.md` 两处过期 | `:149` 说 `DEBUG_PORT` 走原生 USB（错，是 UART0）；`:171` 还写着 USB MIDI 不可用。两次问过没回，先留着 |
+| USB MIDI | 按约定暂时关闭（`MIDI_USB_DEVICE` 关，FQBN 保持 `USBMode=hwcdc,CDCOnBoot=cdc`）。**注意**：重新打开会按作者自己的 guard 再次关掉 `DEBUG_ON`，日志就没了——这是预期行为，不是 bug |
+
+设备管理器里的残留记录（`USB JTAG/serial debug unit`、`COM5` CH340、
+`VID_303A&PID_1001` 全是 `Status = Unknown`）与本项目无关，USB-OTG 走的是
+`VID_303A&PID_1001`，但它作为独立设备出现。**串口日志走 USB-OTG，不走 UART0。**
 
 ---
 
@@ -178,20 +182,15 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 
 **按顺序：**
 
-1. **接板子**（N8R8 / N16R8）→ 接 PCM5102A：
-   BCLK=5 / DIN=6 / WCLR=7 + 3V3 + 共地 → 进功放或有源音箱。
-   **GPIO 15/16/17 必须空着**（`AcidBox.ino:267` 无条件 `pinMode`）。
-   **DAC 从 3V3 供电，不要 5V。**
-2. **浏览器刷 `merged.bin` @ `0x0`**（§4.2）
-3. **M0 验收**：只能靠耳朵 + MIDI 活动监视器，因为 `DEBUG_ON` 关着，**串口零输出**：
-   - 808 个 *sampled* 鼓 → LittleFS 挂上了
-   - `AcidBox S3` / VID `1209` PID `1305` → USB MIDI 枚举成功
-   - 没爆音 → 任务优先级 1→5 有余量
-4. **补上 `BENCH_AUDIO_HEADROOM`**，量出 core-0 的实际余量。
-   **建议在 M1 之前做**——否则 M3 的音序器和 TFT 是踩在一个"我记得好像够"的
-   基线上，而不是一个量出来的数字上。
-5. **确认两个悬而未决的硬件问题**：Arduino 默认 `USBMode`（TinyUSB）和
-   `MIDIUSB_ESP32.h` 的关系；板子真实的 `FlashSize`。
+1. **补上 `BENCH_AUDIO_HEADROOM`**，量出 core-0 的实际余量。
+   **必须在 M1 之前做**——否则 M3 的音序器和 TFT 是踩在一个"我记得好像够"的
+   基线上，而不是一个量出来的数字上。这是从 M0 换来的教训：这里原本是拍脑袋写的
+   优先级 1→5，代价是 `loop()` 被饿死一整轮排查（§7）。
+2. **确认板子真实的 `FlashSize`**，以及 `MIDIUSB_ESP32.h` 与 Arduino 默认
+   `USBMode`（TinyUSB）的关系。
+3. **修 `HARDWARE_SETUP.md` 的 `:149` 和 `:171`**（§5 表里那两行），顺手删掉
+   `config.h` 里已移除的 `M0_REVERB_TOGGLE_PIN` 相关残留说明。
+4. 决定 remote 要不要换 SSH（§2.1），不影响功能。
 
 **然后进 M1**：`engine_iface.h` / `.cpp`，**重新实现** `Acid_Drip` 的行为
 （它的代码不能进仓库，见 §2.3）。M2 才关掉 `JUKEBOX`。
@@ -200,7 +199,73 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 
 ---
 
-## 7. 文件地图
+## 7. M0 的噪音问题：结论、修复、以及两次自我更正
+
+症状：上电一声爆音，然后持续噪音。**已修复**，出货构建 `dbd9993`。
+
+### 7.1 根因
+
+`audio_task2` 的 `taskYIELD()`。`taskYIELD()` **只会让给同级或更高优先级的任务**，
+所以一个 pin 在 core 1、优先级 5 的任务，在同为 core 1、优先级 1 的 Arduino
+`loopTask` 面前根本让不掉——`loop()` 从 `setup()` 之后**再也没跑过**。
+`loop()` 才是 `regular_checks()` → `jukebox_tick()` → `run_tick()` → 音序器
+那条链的入口。一个 note 调度器从来不 tick 的音序机，"上电一声、然后一直噪音"
+完全说得通。
+
+修法：循环末尾 `vTaskDelay(1)`，取代循环开头的 `taskYIELD()`。
+
+**归属问题（别当成已证实的结论）**：我**从没问过** `e2a24a0` 那一版还有没有噪音，
+只问了日志里的数字，而 `e2a24a0` 里已经有这个修复了。所以修复可能早一版就生效了。
+饥饿修复在证据上仍是更可能的那个——它是唯一能解释"只出一声、之后毫无结构"的改动
+——但"更可能"不是"已证实"。
+
+### 7.2 一并修掉的另外三个真实缺陷
+
+1. **`GROUP_HATS` 越界写**：`sampler.ino` 用原始 MIDI 音高 `note±1` 索引
+   `samplePlayer`（84 项），`note` 是 uint8_t 可达 127 → 越界最多 44 项。
+   改用同函数上一行就算好的安全索引 `j`，并双向做边界检查。
+   **如实说明：这版并未证明它在触发**——音序器走 `current_drumkit + drum_note`，
+   `current_drumkit` 上限 72，音高不到 83，两种写法碰巧都在范围内。
+2. **采样播放游标越界**：上游只拿 `sampleSize` 卡上界，而 `sampleSize` 直接来自
+   WAV 头；游标本身由 `pitch` 通过浮点 `samplePosF` 推进，**负浮点转 `uint32`
+   会变成巨大正数而不是负索引**。现在同时对采样本身和真实分配卡界。
+   实测约每 2 秒触发一次——那是 `pitch` 小数累积造成的**例行**末尾越冲，不是故障，
+   所以它是 `[WARN]` 不是 `[ERROR]`。
+3. **`Sampler::Init` 会读出 `RamCache`**：现在在边界处停下。实测缓存用
+   2,338,738 / 3,145,728（74%），84 个采样，没有触发。
+
+### 7.3 被数据排除的假设（都是量的，不是猜的）
+
+- **synth2 卡音 —— 不存在。** 我上一轮把重复出现的 0.376 读成"卡住的振荡器"，错了。
+  `on`/`off` 平衡（s2 on=1..4, off=2..4），`env` 全程 0↔1 跳变。音符在正常分配和释放。
+- **削波 —— 没有。** `out` 峰值 0.95（在 `0.25f` 增益和 `fast_shape` **之后**测的）。
+  之前看到的 2.5568 是我把探针放在了增益之前。
+- **delay 发散 —— 没有。** 它从 0 爬到 1.1464 又落回来，像发散；但
+  `delayFeedback = 0.2`（`fx_delay.h:56`），`y[n] = x[n] + 0.2·y[n-D]` 是稳定的，
+  数据也一致：空线填满后稳定在 0.2–0.6。
+- **reverb** —— mode 1（旁通）下 `reverb=0.0000` 而 `out` 仍在 mode 0 范围内。
+- **数值爆炸** —— 全部 67 个窗口 `bad=0`。
+- **坏 WAV / pitch** —— 从未出现 `BAD HEADER`。
+- **数字信号本身**：所有总线健康，`out` 0.42–0.95，`mixer()` 精确 44.1 kHz。
+  **数字信号里不存在能造成持续噪音的缺陷**，所以才把嫌疑推到 DAC 写出侧，
+  也就是 mode 2 那个"送确知全零缓冲区、听噪音是否还在"的实验。
+
+### 7.4 两次自我更正，都要记住
+
+- **假排除**：我曾说采样器越界读"已排除"。错。那条消息当时**根本不可能出现**——
+  `regular_checks()` 被饿死了，计数器到不了阈值，等于**从来没测过**。
+  "没看到证据"和"证据表明没问题"是两回事。
+- **预处理指令写了但不生效，且失败是静默的**：`.ino` 按字母序拼接，
+  `AcidBanger.ino` 排在 `AcidBox.ino` **前面**，所以 config.h 的符号不保证可见。
+  `#if M0_DIAG` 里一个未声明的标识符求值为 0，编译照过，计数器永不递增，
+  日志打出一堆看着合理的 0。同一个坑咬了两次。
+  同类事故还有第三个：我自己写的校验脚本扫到 `AcidBanger.ino:4` 注释里那句
+  字面量 `#if M0_DIAG`（那行正是在解释这个坑），于是开了一个幽灵块、吞掉 1300 行，
+  diff 看起来完全合理但全错。**校验工具本身也会撒谎，要让它在不平衡时非零退出。**
+
+---
+
+## 8. 文件地图
 
 | 路径 | 是什么 |
 |---|---|
