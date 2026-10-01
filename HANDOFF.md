@@ -5,16 +5,17 @@
 设计决策在 `ESP32S3_FUSION_IMPLEMENTATION.md`，本文**不重复**那些，只写四样别处
 没有的东西：验证过的事实、踩过的坑、当前的阻塞、下一步。
 
-最后更新：`dbd9993`，CI 全绿。**M0 结束**：上电爆音+持续噪音已定位并修复，
+最后更新：`b885d7a`，CI 全绿。**M0 结束**：上电爆音+持续噪音已定位并修复，
 `M0_DIAG` 已置 0，诊断开关原样保留。见 §7。
+§6 的四项里三项已收尾，剩一项（core-0 余量）代码就绪、**等上板量**，见 §6.1。
 
 ---
 
 ## 1. 一句话状态
 
-板子已接上、已刷机、**噪音已消失**——`dbd9993` 是出货构建：`M0_DIAG 0`（无强制静音、
+板子已接上、已刷机、**噪音已消失**——`dbd9993` 是当前出货构建：`M0_DIAG 0`（无强制静音、
 无峰值跟踪），诊断工具链原样保留在开关后面，`DEBUG_ON` 开着。
-软件侧没有已知阻塞；下一步是 §6 的四项。
+软件侧没有已知阻塞。下一步只有一件事：刷 §6.1 那个构建，把 `[BAH]` 的数字抓回来。
 
 ---
 
@@ -182,8 +183,9 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 
 **按顺序：**
 
-1. **补上 `BENCH_AUDIO_HEADROOM`**，量出 core-0 的实际余量。
-   **必须在 M1 之前做**——否则 M3 的音序器和 TFT 是踩在一个"我记得好像够"的
+1. ~~**补上 `BENCH_AUDIO_HEADROOM`**，量出 core-0 的实际余量。~~
+   **代码已就绪**（`b885d7a`，构建 36941812968），**等上板量**。步骤见 §6.1。
+   这是在 M1 之前做的——否则 M3 的音序器和 TFT 会踩在一个"我记得好像够"的
    基线上，而不是一个量出来的数字上。这是从 M0 换来的教训：这里原本是拍脑袋写的
    优先级 1→5，代价是 `loop()` 被饿死一整轮排查（§7）。
 2. **确认板子真实的 `FlashSize`**（FQBN 现在写的是 `FlashSize=16M`，**是声明，不是实测**）。
@@ -204,6 +206,54 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 （它的代码不能进仓库，见 §2.3）。M2 才关掉 `JUKEBOX`。
 
 设计文档里有完整的里程碑和依赖顺序，关键路径 M0 → M1 → M2 → M2.5 → M3 → M4。
+
+---
+
+## 6.1 上板量 core-0 余量（当前唯一待办）
+
+构建 36941812968 / 提交 `b885d7a`，sketch 559,856 B（53%），比出货构建多 1,180 B。
+
+`merged.bin` 4,194,304 B，
+sha256 `B04AC3D7605771396B6757EB9FEB7A1B749A94B589EDB675AF333742FCD6E541`
+
+### 烧录
+
+<https://espressif.github.io/esptool-js/>，`merged.bin` 偏移 **`0x0`**，
+不要用 web.esphome.io。LittleFS **已经在 merged.bin 里**（`noota_3g` 方案
+offset `0x110000`），所以**不需要**单独烧 littlefs，也就不存在
+`FORMAT_LITTLEFS_IF_FAILED` 那个坑。
+
+### 要抓什么
+
+串口监视器开到 **115200**，只连 **USB-OTG** 那个口（UART0 没接出来）。
+
+1. **冷启动日志的前 20 行** —— 顺手把 §6 第 2 项的 `FlashSize` 一起解决，
+   bootloader 的 flash size 那行就在里面。
+2. **运行时的 `[BAH]` 行** —— 每一秒一行，至少抓 20 秒。
+
+### 日志怎么读
+
+```
+[BAH] worst cpu=NNN us = NN.NN% (gen+mix NNN / fill NN)  mean cpu=NNN us = NN.NN%  block max=NNN us  overruns=0 of NNNN buffers
+[BAH] buffer rate check: NNNN buffers in 1000 ms = 44100 Hz (expect 44100)
+```
+
+- **`worst ... %` 是要的那个数。** 判读：< 50% core-0 还有大余量，M1/M3 随便加；
+  50–80% 加东西要盯着；**≥ 100% 意味着已经在欠 DMA 周期，那正是 M0 噪音的成因**，
+  得先降 `DMA_BUF_LEN` 之外的别的开销，别急着进 M1。
+- `overruns` 应当恒为 0。非 0 就是实打实的 underrun。
+- `rate check` 应当正好 44100。对不上就是 `micros()` 的读数不可信，全部数字作废。
+- `mean` 只是陪衬，**不要用它下结论**。均值 300 µs 而某个 buffer 花了 800 µs
+  是完全正常的，而后者才是断音的那一下。
+- `(gen+mix / fill)` 拆开是为了 M1 定位：装完新引擎后如果涨的是 gen+mix，
+  就知道该去优化生成器而不是转换循环。
+- 如果 `worst cpu=0 us ... no buffers completed`，说明 `audio_task1` 没跑，
+  别继续往下分析，先查这个。
+
+### 量完之后
+
+`BENCH_AUDIO_HEADROOM` 改回 `0` 提交（整套东西都关在这一个开关后面），
+把数字写进本节 §6.1，再进 M1。
 
 ---
 
