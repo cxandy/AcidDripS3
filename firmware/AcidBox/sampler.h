@@ -32,6 +32,9 @@ DEBF("Select note: %d\r\n", note);
     uint8_t GetSoundPitch_Midi()  { return samplePlayer[ selectedNote ].pitch_midi; };
     uint8_t GetSoundVolume_Midi() { return samplePlayer[ selectedNote ].volume_midi; };
     int32_t GetSamplesCount()     { return sampleInfoCount; }
+    // M0 diagnostics, read from regular_checks() in normal task context
+    uint32_t GetOobReads()        { return oobReads; }
+    uint32_t GetCacheUsed()       { return cacheUsed; }
     // Offset   for the Sample-Playback to cut the sample from the left
     inline void NoteOn( uint8_t note, uint8_t vol );
     inline void NoteOff( uint8_t note );
@@ -127,6 +130,12 @@ DEBF("Select note: %d\r\n", note);
     volatile int32_t sampleInfoCount = -1; // storing the count if found samples in file system 
     float slowRelease; // slow releasing signal will be used when sample playback stopped 
     uint8_t* RamCache = NULL ;
+
+    // M0 diagnostics. Both counters are written from Sampler::Process(), which runs
+    // inside the IRAM audio task, so nothing may be printed from there -- they are
+    // reported from regular_checks() instead, in normal task context.
+    volatile uint32_t oobReads = 0;    // play cursor left the sample or the cache
+    volatile uint32_t cacheUsed = 0;   // bytes of RamCache actually filled at Init
 
     FxFilterCrusher Effects;
 };

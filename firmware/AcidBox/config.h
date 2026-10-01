@@ -105,11 +105,14 @@ const float  NORM_RADIANS = ONE_DIV_TWOPI * TABLE_SIZE;
 
 #ifdef NO_PSRAM
   #define RAM_SAMPLER_CACHE  40000    // bytes, compact sample set is 132kB, first 8 samples is ~38kB
+  #define SAMPLER_CACHE_SIZE RAM_SAMPLER_CACHE // M0: one name for the real size of RamCache, so the
+                                      // bounds checks in sampler.ino work in both configurations
   #define DEFAULT_DRUMKIT 4           // /data/4/ folder
   #define SAMPLECNT       8           // how many samples we prepare (here just 8)
 #else
   #define PRELOAD_ALL                 // allows operating all the samples in realtime, requires more time to start, recommended for OPI PSRAM of ESP32S3
   #define PSRAM_SAMPLER_CACHE 3145728 // bytes, we are going to preload ALL the samples from FLASH to PSRAM
+  #define SAMPLER_CACHE_SIZE PSRAM_SAMPLER_CACHE // M0: see above
                                       // we divide samples by octaves to use modifiers to particular instruments, not just note numbers
                                       // i.e. we know that all the "C" notes in all octaves are bass drums, and CC_808_BD_TONE affects all BD's
   #define SAMPLECNT       (7 * 12)    // how many samples we prepare (8 octaves by 12 samples)

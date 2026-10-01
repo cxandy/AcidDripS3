@@ -418,6 +418,21 @@ void regular_checks() {
   jukebox_tick();
 #endif
 
+  // M0: report the sampler bounds counter here rather than in Sampler::Process(),
+  // which runs in the IRAM audio task and must not print. Rate limited, and the
+  // DEBUG macros compile away entirely unless DEBUG_ON is set.
+#ifdef DEBUG_ON
+  static uint32_t tick = 0;
+  static uint32_t reported = 0;
+  if ( ++tick >= 2000 ) {
+    tick = 0;
+    if ( Drums.GetOobReads() != reported ) {
+      DEBF("[M0] sampler out-of-bounds reads: %d (new since last report)\r\n",
+           (int)(Drums.GetOobReads() - reported));
+      reported = Drums.GetOobReads();
+    }
+  }
+#endif
 
 }
 

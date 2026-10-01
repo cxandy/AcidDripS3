@@ -205,11 +205,31 @@ void Sampler::Init() {
         } else {
           toRead = len;
         }
+        // M0: upstream never compared buffPointer against the size of RamCache, so a
+        // kit larger than SAMPLER_CACHE_SIZE overran the allocation and every later
+        // sample read whatever followed it in PSRAM. Stop at the edge instead; the
+        // min() two lines below then shrinks dataSize to what we really stored.
+        if ( (buffPointer + toRead) > (size_t)SAMPLER_CACHE_SIZE ) {
+          // %.*s, not %s: filenames[] is filled by a strncpy(...,32) that does not
+          // terminate when the path is 32 chars or longer, so it may not be NUL ended.
+          DEBUG("[M0] RAMCACHE FULL at sample %d (%.*s): have %d, wanted %d more, cap %d",
+                i, 31, filenames[i], (int)buffPointer, (int)toRead, (int)SAMPLER_CACHE_SIZE);
+          len = 0;
+          break;
+        }
         f.read(&(RamCache[buffPointer]), toRead);
         buffPointer += toRead;
         len -= toRead;
       }
       wav.dataSize = min(wav.dataSize, buffPointer-oldPointer); // some samples have wrong header info
+
+      // M0: pitch below is derived straight from wav.sampleRate, and Sampler::Process
+      // uses it to advance a float cursor, so a nonsense rate is enough to make the
+      // play position run away. Report it here, in setup(), where printing is safe.
+      if ( (wav.sampleRate == 0) || (wav.sampleRate > 192000) ) {
+        DEBUG("[M0] BAD HEADER sample %d (%.*s): sampleRate=%d dataSize=%d",
+              i, 31, filenames[i], (int)wav.sampleRate, (int)wav.dataSize);
+      }
       
       samplePlayer[i].sampleRate =      wav.sampleRate;
 #ifdef DEBUG_SAMPLER
@@ -229,6 +249,13 @@ void Sampler::Init() {
       DEBF("error opening file!\n");
     }
   }
+
+  // M0: how much of the cache the kit actually needed. If this sits at the cap, the
+  // load above was truncated and the kit is too big for this configuration.
+  cacheUsed = (uint32_t)buffPointer;
+  DEBF("[M0] RAMCACHE: %d of %d bytes used (%d%%), %d samples\r\n",
+       (int)buffPointer, (int)SAMPLER_CACHE_SIZE,
+       (int)((buffPointer * 100) / (size_t)SAMPLER_CACHE_SIZE), (int)sampleInfoCount);
 
   for ( int i = 0; i < sampleInfoCount; i++ ) {
     int j = (i % repeat ) + 1 ; 
@@ -620,7 +647,21 @@ inline void Sampler::Process( float *left, float *right ) {
       samplePlayer[i].samplePos -= samplePlayer[i].samplePos % 2;
 
       uint32_t dataOut = samplePlayer[i].samplePos;
-      //  DEBUG(dataOut);
+
+      // M0: upstream only bounded this cursor from above, and only against sampleSize,
+      // which is taken verbatim from the WAV header. The cursor itself is driven by a
+      // float (samplePosF) through pitch, so a bad rate can push it anywhere -- and a
+      // negative float converts to a huge uint32 here, not to a negative index. Bound
+      // it against both the sample and the real allocation before dereferencing.
+      // No printing in here: this runs in the IRAM audio task.
+      if ( ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize) ||
+           ((size_t)samplePlayer[i].sampleStart + dataOut + 1 >= (size_t)SAMPLER_CACHE_SIZE) ) {
+        oobReads++;
+        samplePlayer[i].active     = false;
+        samplePlayer[i].samplePos  = 0;
+        samplePlayer[i].samplePosF = 0.0f;
+        continue;
+      }
 
       //
       // reconstruct signal from data
