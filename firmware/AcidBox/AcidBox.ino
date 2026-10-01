@@ -21,6 +21,11 @@
 */
 #pragma GCC optimize ("O2")
 #include "config.h"
+// M1: AcidBox.ino sorts BEFORE engine_iface.ino, so setup() and regular_checks() would not
+// see eng_init()/eng_poll() from the concatenation alone. Without this the calls fail to
+// compile -- but see AcidBanger.ino:4 for the same trap's quieter form, where an
+// undeclared name inside #if evaluates to 0 instead of erroring. Do not rely on position.
+#include "engine_iface.h"
 #include "fx_delay.h"
 #ifndef NO_PSRAM
 #include "fx_reverb.h"
@@ -368,6 +373,8 @@ delay(200);
   Synth1.Init();
   Synth2.Init();
   Drums.Init();
+  eng_init(); // M1: the event queue. After the engines are up, because anything posting an
+              // event before this applies straight through instead of queueing.
 #ifndef NO_PSRAM
   Reverb.Init();
 #endif
@@ -472,23 +479,32 @@ void paramChange(uint8_t paramNum, float paramVal) {
   // paramVal === param[paramNum];
   DEBF ("param %d val %0.4f\r\n" , paramNum, paramVal);
   paramVal *= 127.0;
+  // M1: routed through eng_setParam() rather than calling Synth2.ParseCC() directly.
+  //
+  // Nothing calls this function -- the only call site is commented out at AcidBox.ino:470
+  // -- so it is not a second writer today. It is routed anyway, for two reasons. The
+  // invariant that engine parameters have exactly one writer should not be something that
+  // quietly stops holding the moment somebody revives a dead function, and the float here
+  // was being handed to ParseCC(uint8_t, uint8_t) as an implicit truncation. Going
+  // through the event layer makes that narrowing an explicit cast at the boundary, where
+  // it can be seen.
   switch (paramNum) {
     case 0:
       //set_bpm( 40.0f + (paramVal * 160.0f));
-      Synth2.ParseCC(CC_303_CUTOFF, paramVal);
+      eng_setParam(Ch::Second, CC_303_CUTOFF, (uint8_t)paramVal);
       break;
     case 1:
-      Synth2.ParseCC(CC_303_RESO, paramVal);
+      eng_setParam(Ch::Second, CC_303_RESO, (uint8_t)paramVal);
       break;
     case 2:
-      Synth2.ParseCC(CC_303_OVERDRIVE, paramVal);
-      Synth2.ParseCC(CC_303_DISTORTION, paramVal);
+      eng_setParam(Ch::Second, CC_303_OVERDRIVE, (uint8_t)paramVal);
+      eng_setParam(Ch::Second, CC_303_DISTORTION, (uint8_t)paramVal);
       break;
     case 3:
-      Synth2.ParseCC(CC_303_ENVMOD_LVL, paramVal);
+      eng_setParam(Ch::Second, CC_303_ENVMOD_LVL, (uint8_t)paramVal);
       break;
     case 4:
-      Synth2.ParseCC(CC_303_ACCENT_LVL, paramVal);
+      eng_setParam(Ch::Second, CC_303_ACCENT_LVL, (uint8_t)paramVal);
       break;
     default:
       {}
@@ -534,6 +550,30 @@ void regular_checks() {
 
 #ifdef JUKEBOX
   jukebox_tick();
+#endif
+
+  // M1: apply everything that was posted above -- MIDI events from MIDI.read(), and
+  // sequencer events from jukebox_tick() -- in one pass, in arrival order.
+  //
+  // Here rather than at the top of the function so that the drain happens in the SAME
+  // loop() iteration the events were queued in. That is what keeps this from costing
+  // MIDI a tick of latency: enqueue and dequeue inside one pass, and the queue is pure
+  // bookkeeping. Move this call and the note-on path acquires a scheduling delay, which
+  // is audible on fast passages and easy to misattribute to the sequencer.
+  eng_poll();
+
+  // Events dropped for want of queue space. Expected to stay zero; see ENGINE_QUEUE_LEN
+  // in engine_iface.h for the arithmetic. Reported only when nonzero, and cumulative, so
+  // a single quiet moment does not hide it -- a drop is an audible gap and it has to be
+  // traceable to when it happened.
+#ifdef DEBUG_ON
+  static uint32_t engDropsSeen = 0;
+  if ( eng_drops() != engDropsSeen ) {
+    engDropsSeen = eng_drops();
+    DEBF("[WARN] event queue overflow: %u events dropped (total). Drain is too slow for the "
+         "event rate -- raise ENG_DRAIN_MAX or ENGINE_QUEUE_LEN.\r\n",
+         (unsigned)engDropsSeen);
+  }
 #endif
 
   // M0: the sampler's play cursor ran off the end of a sample. Reported here rather

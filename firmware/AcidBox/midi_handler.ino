@@ -1,3 +1,8 @@
+// M1: every handler below delegates to engine_iface. The include is redundant while
+// "engine_iface" sorts before "midi_handler" -- which is the only reason this delegation
+// points the way it does -- but the dependency should not rest on alphabetical order.
+#include "engine_iface.h"
+
 inline void MidiInit() {
   
 #ifdef MIDI_VIA_SERIAL
@@ -51,66 +56,73 @@ inline void MidiInit() {
 }
 
 
+// M1: every handler below now delegates to engine_iface instead of touching the engines
+// directly, MIDI included. The reason MIDI is not left on the old path is in
+// engine_iface.h -- one writer, and one implementation that both entry points share, so
+// "the sequencer sounds like MIDI" stops being something to check by ear.
+//
+// Two behaviours deliberately stayed here rather than moving into the interface layer,
+// because they are about the MIDI cable and not about the engines:
+//
+//   - the one-per-second rate limit on notes-off, via millis()-last_reset
+//   - do_midi_stop() under JUKEBOX, because a MIDI panic should stop playback
+//
+// A sequencer calling eng_allNotesOff() gets plain engine silence and no rate limit.
+// Dropping the jukebox is a decision the sequencer has no business making.
+
 inline void handleNoteOn(uint8_t inChannel, uint8_t inNote, uint8_t inVelocity) {
 #ifdef DEBUG_MIDI
   DEB("MIDI note on ");
   DEBUG(inNote);
 #endif
-  if (inChannel == DRUM_MIDI_CHAN )         {Drums.NoteOn(inNote, inVelocity);}
-  else if (inChannel == SYNTH1_MIDI_CHAN )  {Synth1.on_midi_noteON(inNote, inVelocity);}
-  else if (inChannel == SYNTH2_MIDI_CHAN )  {Synth2.on_midi_noteON(inNote, inVelocity);}
+  Ch ch;
+  if ( !chanToCh(inChannel, ch) ) return;   // omni mode: channels we don't own
+  // accent=false on this path, and that is the faithful mapping. AcidBox expresses accent
+  // as velocity >= 80 inside the voice (synthvoice.ino:223); it has no separate accent
+  // flag on MIDI. Claiming accent here from velocity >= 80 would be the same test twice,
+  // and would pin every accented MIDI note to exactly 127 and throw away how hard the
+  // key was actually struck.
+  eng_noteOn(ch, inNote, inVelocity, false);
 }
 
 inline void handleNoteOff(uint8_t inChannel, uint8_t inNote, uint8_t inVelocity) {
-  if (inChannel == DRUM_MIDI_CHAN )         {Drums.NoteOff(inNote);}
-  else if (inChannel == SYNTH1_MIDI_CHAN )  {Synth1.on_midi_noteOFF(inNote, inVelocity);}
-  else if (inChannel == SYNTH2_MIDI_CHAN )  {Synth2.on_midi_noteOFF(inNote, inVelocity);}
-
+  (void)inVelocity;   // both engines discard it; see eng_apply() in engine_iface.ino
+  Ch ch;
+  if ( !chanToCh(inChannel, ch) ) return;
+  eng_noteOff(ch, inNote);
 }
 
 inline void handleCC(uint8_t inChannel, uint8_t cc_number, uint8_t cc_value) {
-  switch (cc_number) { // global parameters yet set via ANY channel CCs
-    case CC_ANY_COMPRESSOR:
-      Comp.SetRatio(3.0f + cc_value * 0.307081f);
-      break;
-    case CC_ANY_DELAY_TIME:
-      Delay.SetLength(cc_value * MIDI_NORM);
-      break;
-    case CC_ANY_DELAY_FB:
-      Delay.SetFeedback(cc_value * MIDI_NORM);
-      break;
-    case CC_ANY_DELAY_LVL:
-      Delay.SetLevel(cc_value * MIDI_NORM);
-      break;
+  switch (cc_number) {
+    // Only the stop group is handled here. Everything else -- including the global
+    // compressor / delay / reverb CC_ANY_* parameters -- goes to eng_setParam, which
+    // matches those on the CC number before any channel routing. Leaving them in this
+    // function would have kept two implementations of the same dispatch, which is the
+    // bug M1 exists to remove.
     case CC_ANY_RESET_CCS:
     case CC_ANY_NOTES_OFF:
     case CC_ANY_SOUND_OFF:
-        if (inChannel == SYNTH1_MIDI_CHAN && millis()-last_reset>1000 ) {
+      if (inChannel == SYNTH1_MIDI_CHAN && millis()-last_reset>1000 ) {
 #ifdef JUKEBOX
-          do_midi_stop();
+        do_midi_stop();
 #endif
-          Synth1.allNotesOff();
-          Synth2.allNotesOff();
-          last_reset = millis();
-        }
+        eng_allNotesOff();
+        last_reset = millis();
+      }
       break;
-#ifndef NO_PSRAM
-    case CC_ANY_REVERB_TIME:
-      Reverb.SetTime(cc_value * MIDI_NORM);
+    default: {
+      Ch ch;
+      if ( !chanToCh(inChannel, ch) ) return;
+      eng_setParam(ch, cc_number, cc_value);
       break;
-    case CC_ANY_REVERB_LVL:
-      Reverb.SetLevel(cc_value * MIDI_NORM);
-      break;
-#endif
-    default:
-      if (inChannel == DRUM_MIDI_CHAN )         {Drums.ParseCC(cc_number, cc_value);}
-      else if (inChannel == SYNTH1_MIDI_CHAN )  {Synth1.ParseCC(cc_number, cc_value);}
-      else if (inChannel == SYNTH2_MIDI_CHAN )  {Synth2.ParseCC(cc_number, cc_value);}
+    }
   }
 }
 
 void handleProgramChange(uint8_t inChannel, uint8_t number) {
-  if (inChannel == DRUM_MIDI_CHAN) {     Drums.SetProgram(number);  }
+  // The channel check stays: which channel a program change arrived on is a MIDI fact,
+  // and eng_selectProgram() takes none.
+  if (inChannel == DRUM_MIDI_CHAN) {     eng_selectProgram(number);  }
 }
 
 inline void handlePitchBend(uint8_t inChannel, int number) {

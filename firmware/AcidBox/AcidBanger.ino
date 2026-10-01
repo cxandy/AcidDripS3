@@ -6,6 +6,11 @@
 // reports plausible-looking zeros with nothing behind them. config.h has #pragma once,
 // so including it here as well costs nothing.
 #include "config.h"
+// M1: same reasoning as the line above, for the same reason -- AcidBanger.ino sorts
+// before engine_iface.ino, so eng_selectProgram() below would otherwise be an
+// undeclared name. A name in a plain call fails to compile, which is the good case; the
+// bad case is the #if one described above, where it silently becomes 0.
+#include "engine_iface.h"
 
 #ifdef JUKEBOX
 // This is The "Endless Acid Banger"
@@ -503,7 +508,7 @@ void sequencer_step(byte step) {
     if (flip(30)) {
       //change drumkit
       current_drumkit = myRandom(((Drums.GetSamplesCount()-1)/12)) * 12 ;
-      Drums.SetProgram(current_drumkit);
+      eng_selectProgram(current_drumkit);
 #ifdef DEBUG_JUKEBOX
       DEBF("Selected drumkit: %d\r\n" , current_drumkit);
 #endif
