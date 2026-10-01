@@ -222,10 +222,22 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 
 ## 6.1 上板量 core-0 余量（当前唯一待办）
 
-构建 36941812968 / 提交 `b885d7a`，sketch 559,856 B（53%），比出货构建多 1,180 B。
+构建 36942629138 / 提交 `432ae84`（**注意：是 M1 那个构建，不是 `b885d7a`**）。
+`BENCH_AUDIO_HEADROOM` 在 M1 里没动，还是 `1`，所以这一个固件同时带
+`[BAH]` 仪表**和** M1 的事件层——一次刷机把三件事一起验了：
+
+| 这次刷机验什么 | 看哪一行 / 怎么验 |
+|---|---|
+| core-0 余量 | `[BAH]` 的 `worst cpu=...%` 和 `overruns` |
+| 板子真实 `FlashSize` | 冷启动日志前 20 行里 bootloader 那行 |
+| **M1 的事件层** | MIDI 键盘出声正常、jukebox 照常播、**日志里没有** `[WARN] event queue overflow` |
+
+`dbd9993` 那个出货构建不带 `[BAH]`，别刷错。
+
+sketch 561,192 B（53%），全局变量 60,704 B。
 
 `merged.bin` 4,194,304 B，
-sha256 `B04AC3D7605771396B6757EB9FEB7A1B749A94B589EDB675AF333742FCD6E541`
+sha256 `006791F979D365FA1136F8EA40BAE3406A25CA3A4FCDEDA32385FDFC7D9ABD6F`
 
 ### 烧录
 
@@ -241,6 +253,10 @@ offset `0x110000`），所以**不需要**单独烧 littlefs，也就不存在
 1. **冷启动日志的前 20 行** —— 顺手把 §6 第 2 项的 `FlashSize` 一起解决，
    bootloader 的 flash size 那行就在里面。
 2. **运行时的 `[BAH]` 行** —— 每一秒一行，至少抓 20 秒。
+3. **顺手听一下** —— 接 MIDI 键盘弹几个音，再等 30 秒让 jukebox 播一段。
+   这是 M1 的验收标准（§6.3），**目前还没有人听过**。
+4. **在日志里搜 `overflow`** —— M1 的队列如果溢出会有 `[WARN] event queue overflow`。
+   应该一次都不出现。
 
 ### 日志怎么读
 
