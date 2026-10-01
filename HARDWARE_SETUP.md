@@ -229,28 +229,34 @@ M1 之后会陆续吃掉这个余量，CI 的 run 页面会一直显示这两个
 
 ### 5.5 完全不装软件：浏览器烧写
 
-**先说 web.esphome.io：能用一半，但不要用它。**
+**web.esphome.io 刷不了 `littlefs.bin`，一个字节都刷不进去。用 ESP Web Tools。**
 
 |  | web.esphome.io | espressif.github.io/esptool-js |
 |---|---|---|
 | 出品方 | ESPHome | Espressif 官方（`esptool` 的 WebAssembly 版） |
-| 文件槽位 | **固定 4 个**（bootloader / partitions / boot_app0 / firmware） | **任意多个，每个自己填地址** |
+| 定位 | **ESPHome 设备向导**：写 YAML → 交给它的构建服务器编译 → 刷它编出来的固件 | 通用刷写器 |
+| 文件槽位 | 只有"一个固件"，没有自选文件/自选地址的界面 | **任意多个，每个自己填地址** |
 | 能刷 `littlefs.bin` | **不能** | 能 |
-| 需要 HTTPS + Chrome/Edge | 是 | 是 |
+| 浏览器 | Chrome / Edge / Firefox 151+ | Chrome / Edge（Safari 不支持） |
 
-它只有四个**固件**槽位（bootloader / partition table / boot app0 / app），
-**没有文件系统槽位**，鼓组鼓包刷不进去，还是得回去用 esptool 烧 `littlefs.bin`。
-那就变成"浏览器刷固件 + 命令行刷鼓组"两套流程，还得保证两边用的是同一次 CI 的产物。
+这是对着它发布出去的 `app.*.js` 数的，不是猜的：`littlefs`、`spiffs`、
+`write_flash`、`boot_app0`、`0x8000`、`0xe000` 在整个 bundle 里**出现次数全是 0**。
+它内部传给烧录引擎的确实是一个 `{address, data}` 数组，但产品界面上没有任何地方
+让你往里放自己的文件——只放它自己编出来的那一个固件。
 
-而且它的 app 偏移是按 esp-idf 默认分区表推算的，`noota_3g` 的 otadata 在 `0xe000`
-而不是常见的 `0xe0000`——这种事让工具替你猜没好处。
+所以走 web.esphome.io 的实际后果是：鼓组鼓包还是得用 esptool 烧，
+变成"浏览器刷固件 + 命令行刷鼓组"两套流程，还得保证两边是同一次 CI 的产物。
 用 ESP Web Tools 一次做完，五个地址自己填，和 `flash-args.txt` 一一对应。
+
+> 顺带：它的 bundle 里有一处按 `VID 0x303A / PID 0x1001`、`0x1002` 识别芯片，
+> 也就是**明确支持 S3 原生 USB 的 ROM 下载模式**——所以"原生 USB 口能不能刷"
+> 这件事本身没问题，问题只在它不给你放文件系统镜像的地方。
 
 **关键：必须插原生 USB 口（USB OTG，GPIO19/20），不能插 UART 桥。**
 
 CH340 / CP2102 / FTDI 这类桥片芯片 Chrome 的 Web Serial **认不出来**。
-（页面顶上那个 `WebUSB (CH340)` 勾选框是另一条路：走 WebUSB 直通，但在
-Windows / macOS / Linux 上 usbserial 内核驱动会先占住那个接口，
+（ESP Web Tools 页面顶上那个 `WebUSB (CH340)` 勾选框是另一条路：走 WebUSB 直通，
+但在 Windows / macOS / Linux 上 usbserial 内核驱动会先占住那个接口，
 `claimInterface` 直接失败——页面上那段小字说的就是这件事。
 只有 Android / Chrome OTG 才稳。我们是桌面机，别走这条。）
 
@@ -259,8 +265,7 @@ Windows / macOS / Linux 上 usbserial 内核驱动会先占住那个接口，
 
 **步骤（ESP Web Tools）：**
 
-1. Chrome 或 Edge 打开 <https://espressif.github.io/esptool-js/>
-   （Safari 不支持；Firefox 没有 Web Serial）
+1. Chrome 或 Edge 打开 <https://espressif.github.io/esptool-js/>（Safari 不支持）
 2. 按住 `BOOT` → 点 `RST` → 松开 `BOOT`
 3. Baudrate 选 `921600` → 点 **Connect** → 确认认出 `ESP32-S3`
 4. Flash Mode **keep** / Flash Freq **keep** / Flash Size **keep**
