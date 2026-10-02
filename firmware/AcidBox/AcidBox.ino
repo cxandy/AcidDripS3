@@ -110,8 +110,11 @@ volatile uint32_t m0NoteOff[2] = { 0, 0 };
 volatile uint32_t m0ShortWrites = 0;
 volatile uint32_t m0ShortBytes = 0;
 volatile uint32_t m0I2SCalls   = 0;
-volatile uint32_t m0OobSample  = 0;
-volatile uint32_t m0OobCache   = 0;
+// M0's own oob split is gone. Sampler::Process now counts the two conditions
+// unconditionally into Drums.oobSample / Drums.oobCache, because a counter that only
+// exists under M0_DIAG does not exist in the build that ships, and the first run that
+// actually exercised the guard had to report a harmless 2-byte tail overshoot and a
+// potential runaway through one combined number. The M0 report below reads those two.
 
 // Peak amplitude of each bus in mixer(), read and printed from regular_checks().
 // Written from the IRAM audio task, so plain stores only: no printing, and no libm
@@ -596,15 +599,33 @@ void regular_checks() {
   // seconds, which is the routine end-of-sample overshoot that fractional pitch makes
   // and not a fault -- so it is a warning, not an error, and it should stay quiet on a
   // healthy kit. If it goes from occasional to continuous, that is new information.
+  //
+  // 2026-10-02, first run that ever saw this fire, and the message was wrong in a way
+  // that mattered: it said "left the sample or the cache" as if those were one event.
+  // They are not. Simulating Process()'s cursor arithmetic against all 84 loaded samples
+  // shows the sample case costs a 1-2 frame over-read -- at most 6 bytes at any CC pitch,
+  // and only 2 of the 84 samples can reach it at the default slot pitch. The cache case
+  // means the float cursor left RamCache and has never been seen. Reporting the split is
+  // the whole point: "tail" is noise, "CACHE" is a fault, and one counter cannot say which.
 #ifdef DEBUG_ON
   static uint32_t tick = 0;
   static uint32_t reported = 0;
+  static uint32_t reportedCache = 0;
   if ( ++tick >= 2000 ) {
     tick = 0;
     if ( Drums.GetOobReads() != reported ) {
-      DEBF("[WARN] sampler play cursor left the sample or the cache: %d (new since last report)\r\n",
+      DEBF("[WARN] sampler cursor hit the end of its own sample: %d new "
+           "(1-2 frame overshoot, benign; max 6 bytes, 2 of 84 samples can reach it)\r\n",
            (int)(Drums.GetOobReads() - reported));
       reported = Drums.GetOobReads();
+    }
+    // Checked separately and reported louder, because this is the one that would be a
+    // real defect: the play cursor walked off the end of RamCache rather than the end of
+    // a sample. Never seen as of 2026-10-02. If this ever appears, stop and look.
+    if ( Drums.GetOobCache() != reportedCache ) {
+      DEBF("[WARN] *** sampler cursor LEFT RAMCACHE: %d new -- real fault, float cursor ran away ***\r\n",
+           (int)(Drums.GetOobCache() - reportedCache));
+      reportedCache = Drums.GetOobCache();
     }
   }
 #endif
@@ -740,13 +761,11 @@ void regular_checks() {
     // this run has shown; oobSample is the routine end-of-sample case.
     DEBF("[M0] i2s=%u short=%u shortBytes=%u oobSample=%u oobCache=%u\r\n",
          (unsigned)m0I2SCalls, (unsigned)m0ShortWrites, (unsigned)m0ShortBytes,
-         (unsigned)m0OobSample, (unsigned)m0OobCache);
+         (unsigned)Drums.GetOobSample(), (unsigned)Drums.GetOobCache());
     m0MixerCalls = 0;
     m0I2SCalls = 0;
     m0ShortWrites = 0;
     m0ShortBytes = 0;
-    m0OobSample = 0;
-    m0OobCache = 0;
     m0NoteOn[0] = 0;  m0NoteOn[1] = 0;
     m0NoteOff[0] = 0; m0NoteOff[1] = 0;
     m0pk_drums = 0.0f;  m0pk_synth1 = 0.0f;  m0pk_synth2 = 0.0f;

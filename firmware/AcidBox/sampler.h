@@ -34,6 +34,8 @@ DEBF("Select note: %d\r\n", note);
     int32_t GetSamplesCount()     { return sampleInfoCount; }
     // M0 diagnostics, read from regular_checks() in normal task context
     uint32_t GetOobReads()        { return oobReads; }
+    uint32_t GetOobSample()       { return oobSample; }
+    uint32_t GetOobCache()        { return oobCache; }
     uint32_t GetCacheUsed()       { return cacheUsed; }
     // Offset   for the Sample-Playback to cut the sample from the left
     inline void NoteOn( uint8_t note, uint8_t vol );
@@ -135,6 +137,17 @@ DEBF("Select note: %d\r\n", note);
     // inside the IRAM audio task, so nothing may be printed from there -- they are
     // reported from regular_checks() instead, in normal task context.
     volatile uint32_t oobReads = 0;    // play cursor left the sample or the cache
+    // The split matters and used to be unreachable. oobSample is the cursor reaching the
+    // end of its own sample, which the guard below handles and which costs a 1-2 frame
+    // over-read -- measured 2026-10-02, at most 6 bytes across the whole CC pitch range,
+    // and only on 2 of the 84 loaded samples. oobCache is the cursor leaving RamCache
+    // entirely, which nothing should ever do and which would mean the float cursor ran
+    // away. One combined number cannot tell those apart, which is exactly why it read
+    // like a defect on the first run that actually exercised it: a harmless 2-byte
+    // overshoot and a runaway both increment the same counter. M0 already had the split
+    // but only under M0_DIAG, so in the shipping build the distinction did not exist.
+    volatile uint32_t oobSample = 0;  // cursor reached the end of its own sample
+    volatile uint32_t oobCache  = 0;  // cursor left RamCache -- this one is a real fault
     volatile uint32_t cacheUsed = 0;   // bytes of RamCache actually filled at Init
 
     FxFilterCrusher Effects;

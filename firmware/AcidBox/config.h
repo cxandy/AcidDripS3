@@ -121,11 +121,13 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
   extern volatile uint32_t m0ShortBytes;
   extern volatile uint32_t m0I2SCalls;
 
-  // The two conditions sampler Process() guards against, counted separately. The
-  // first is the play cursor reaching the end of its own sample, which pitch makes
-  // routine; the second is the cursor leaving the cache entirely, which is not.
-  extern volatile uint32_t m0OobSample;
-  extern volatile uint32_t m0OobCache;
+  // The two conditions sampler Process() guards against used to be declared here and
+  // defined in AcidBox.ino, counted only under M0_DIAG. They now live on the Sampler
+  // itself as oobSample / oobCache and are counted unconditionally, because the split is
+  // the entire value: the first condition is a 1-2 frame tail overshoot and the second
+  // is the cursor leaving RamCache, and a counter that only exists in the diagnostic
+  // build cannot keep them apart in the build that ships. Read them through
+  // Drums.GetOobSample() / Drums.GetOobCache().
 
   // Every I2S.write() in i2s_setup.ino goes through this, so the return value is
   // inspected in exactly one place. I2S.write() is documented to return the number of

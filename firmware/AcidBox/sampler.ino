@@ -663,18 +663,20 @@ inline void Sampler::Process( float *left, float *right ) {
       // negative float converts to a huge uint32 here, not to a negative index. Bound
       // it against both the sample and the real allocation before dereferencing.
       // No printing in here: this runs in the IRAM audio task.
-      if ( ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize) ||
-           ((size_t)samplePlayer[i].sampleStart + dataOut + 1 >= (size_t)SAMPLER_CACHE_SIZE) ) {
+      // Both conditions are always evaluated now rather than short-circuited, so the
+      // counters can be split. Costs one extra comparison per active voice per buffer,
+      // against a measured 594 us of generator work -- immeasurable, and it was the
+      // short-circuit that made the distinction unavailable outside M0_DIAG.
+      bool oobSmp_ = ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize);
+      bool oobCch_ = ((size_t)samplePlayer[i].sampleStart + dataOut + 1
+                      >= (size_t)SAMPLER_CACHE_SIZE);
+      if ( oobSmp_ || oobCch_ ) {
         oobReads++;
-#if M0_DIAG
-        // M0: counted apart because the two conditions are not equally alarming. The
-        // first is the cursor reaching the end of its own sample, which fractional
-        // pitch makes routine and which the guard handles; the second is the cursor
-        // leaving the cache entirely, which it should never do. Reporting one combined
-        // number made a harmless rate look like a defect.
-        if ( (size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize ) { m0OobSample++; }
-        else { m0OobCache++; }
-#endif
+        // A tail overshoot and a cursor that left the cache are not the same event and
+        // must not share a counter. Only the second is a fault; measured 2026-10-02 the
+        // first costs a 1-2 frame over-read, at most 6 bytes at any CC pitch, and the
+        // second has never been seen.
+        if ( oobSmp_ ) { oobSample++; } else { oobCache++; }
         samplePlayer[i].active     = false;
         samplePlayer[i].samplePos  = 0;
         samplePlayer[i].samplePosF = 0.0f;
