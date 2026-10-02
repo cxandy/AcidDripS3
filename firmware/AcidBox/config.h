@@ -154,9 +154,11 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 #endif
 
 /* BENCH_AUDIO_HEADROOM: how much of each buffer period does the audio actually cost? */
-#define BENCH_AUDIO_HEADROOM 1  // M1's precondition. The priority 1 -> 5 change that
-                        // fixed the starving loop() was a guess, and guessing is what
-                        // cost M0 a full round of bench diagnosis. Measure, then build.
+#define BENCH_AUDIO_HEADROOM 0  // Measured, four times, then switched off.
+                        //
+                        // It was built because the priority 1 -> 5 change that fixed the
+                        // starving loop() was a guess, and guessing is what cost M0 a
+                        // full round of bench diagnosis. Measure, then build.
                         //
                         // What "headroom" means here, precisely, because the obvious
                         // reading is the wrong one: audio_task1 is pinned to core 0 at
@@ -168,13 +170,33 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
                         // not refilled in time, the DMA underruns, and the DAC holds its
                         // last sample. That is the noise M0 just spent a milestone on.
                         //
-                        // So the number that matters is the WORST buffer, not the mean.
-                        // An average of 300 us is worth nothing next to one buffer that
-                        // took 800; audio failures live in the tail.
+                        // The answer, across 29 + 65 + 53 + 100 windows:
+                        //   mean cpu      594.6 us = 82.0%  (median 82.3%, 77.0-84.7%)
+                        //   worst cpu     799 us    = 110%  in the worst single window
+                        //   SHORTWRITES   0 in every window of every run
+                        //   overruns      0.023% of buffers -- a budget warning, repaid
+                        //                 by slack in later buffers, NOT a fault
+                        //   fill          17-20 us = 2.6%, so do not go optimising the
+                        //                 float->int16 loop
+                        // Headroom for M3: ~111 us/buffer off the worst window mean
+                        // observed. The M3 target of 10% (72 us) leaves 30-40 us spare.
                         //
-                        // Set to 0 to strip it. Like M0_DIAG, everything stays behind
-                        // this one switch, so it can come back if M3 needs re-measuring
-                        // after the TFT work lands on core 0.
+                        // Two things this thing taught that are worth more than the
+                        // number, and both are why it is off now:
+                        //
+                        // 1. Boot-to-boot noise on this measurement is about +/-3
+                        //    percentage points. Two boots of the SAME binary measured
+                        //    79.93% and 82.71%. So a single run's mean is not a result
+                        //    and must never be compared against another single run.
+                        //    This is what made a 5-point "regression" look real.
+                        // 2. SHORTWRITES is the only direct dropout measurement. The
+                        //    overruns number is a budget warning and was briefly
+                        //    mislabelled as a fault; see HANDOFF.md 6.1.
+                        //
+                        // Everything stays behind this one switch, so it comes straight
+                        // back if M3 needs re-measuring after the TFT work lands on
+                        // core 0 -- and it should, because TFT is exactly the kind of
+                        // change that moves this number.
 #define BAH_MS 1000        // report window. Long enough that the worst buffer in it is
                         // a fair sample of the worst, short enough to watch a break or
                         // a fill arrive.
