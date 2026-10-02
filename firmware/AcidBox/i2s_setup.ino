@@ -152,8 +152,26 @@ static inline void i2s_output () {
 #if BENCH_AUDIO_HEADROOM
   uint32_t bahFillT1_ = micros();
   bahFillUs = bahFillT1_ - bahFillT0_;
-#endif
+  // The one direct underrun measurement in the whole project. I2S.write() returns the
+  // number of bytes it accepted, so a short return is the API stating that the DMA was
+  // not given a complete buffer in time -- audio dropped, not merely slow.
+  //
+  // Deliberately duplicates the return value that M0_I2S_WRITE() throws away. That macro
+  // exists to keep the shipping write byte-identical to upstream, and that is still the
+  // right call for it; it is the wrong place to hang the one number this project most
+  // needs to trust. If I2S.write() ever returns short here, bahShortWrites stops being 0
+  // and every timing figure in this build has to be re-examined.
+  {
+    size_t bahW_ = I2S.write((uint8_t*)out_buf[current_out_buf]._signed,
+                             sizeof(out_buf[current_out_buf]._signed));
+    if ( bahW_ < sizeof(out_buf[current_out_buf]._signed) ) {
+      bahShortWrites++;
+      bahShortBytes += (uint32_t)(sizeof(out_buf[current_out_buf]._signed) - bahW_);
+    }
+  }
+#else
   M0_I2S_WRITE();
+#endif
 #if BENCH_AUDIO_HEADROOM
   bahBlockUs = micros() - bahFillT1_;
 #endif

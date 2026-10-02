@@ -147,6 +147,12 @@ volatile uint32_t bahCount       = 0;
 volatile uint32_t bahOverruns    = 0;
 volatile uint32_t bahFillUs      = 0;
 volatile uint32_t bahBlockUs     = 0;
+// Cumulative on purpose, never reset. The short-write count is the one number here that
+// means "audio was actually dropped", so it must survive windowing: a dropout that
+// happened once, two minutes ago, is still a dropout that happened.
+volatile uint32_t bahShortWrites = 0;
+volatile uint32_t bahShortBytes  = 0;
+volatile uint32_t bahMinBlockUs  = 0xFFFFFFFFu;
 #endif
 
 // Audio buffers of all kinds
@@ -268,9 +274,15 @@ static void IRAM_ATTR audio_task1(void *userData) {
         if ( bahG_  > bahMaxGenMixUs ) bahMaxGenMixUs = bahG_;
         if ( bahFillUs  > bahMaxFillUs   ) bahMaxFillUs   = bahFillUs;
         if ( bahBlockUs > bahMaxBlockUs  ) bahMaxBlockUs  = bahBlockUs;
+        if ( bahBlockUs < bahMinBlockUs  ) bahMinBlockUs  = bahBlockUs;
         if ( bahC_  > bahMaxCpuUs    ) bahMaxCpuUs    = bahC_;
         bahSumCpuUs += bahC_;
         bahCount++;
+        // Budget overrun, NOT a fault. Deliberately kept as a separate number from
+        // bahShortWrites above precisely because conflating the two is what the first
+        // bench round got wrong: a buffer costing more than the period is repaid by the
+        // slack in the buffers after it, and only a short write means the DMA actually
+        // went hungry. 11 of these in 29 windows, with the noise fixed, is the proof.
         if ( bahC_ > (uint32_t)DMA_BUF_TIME ) bahOverruns++;
       }
 #endif
@@ -611,7 +623,10 @@ void regular_checks() {
       bahLegend = true;
       DEBF("[BAH] core-0 load: worst buffer vs the %d us the DMA gives it. "
            "cpu = generators + mixer + float->int16. block = time parked in I2S.write(), "
-           "which is the DMA pacing us and is NOT our cost.\r\n", (int)DMA_BUF_TIME);
+           "which is the DMA pacing us and is NOT our cost. "
+           "OVERRUN is a budget warning, NOT a fault: a slow buffer is repaid by the slack "
+           "in the next ones. SHORT WRITES is the only direct dropout measurement -- "
+           "that number must stay 0.\r\n", (int)DMA_BUF_TIME);
     }
     if ( bahCount > 0 ) {
       // Percentages as hundredths of a percent so no float formatting is needed here;
@@ -620,11 +635,14 @@ void regular_checks() {
       uint32_t bahMeanUs   = bahSumCpuUs / bahCount;
       uint32_t bahMeanPct  = (bahMeanUs    * 10000u) / (uint32_t)DMA_BUF_TIME;
       DEBF("[BAH] worst cpu=%u us = %u.%02u%% (gen+mix %u / fill %u)  "
-           "mean cpu=%u us = %u.%02u%%  block max=%u us  overruns=%u of %u buffers\r\n",
+           "mean cpu=%u us = %u.%02u%%  block min/max=%u/%u us  "
+           "overruns=%u of %u buffers  SHORTWRITES=%u (%u bytes dropped, since boot)\r\n",
            (unsigned)bahMaxCpuUs,    (unsigned)(bahWorstPct / 100u), (unsigned)(bahWorstPct % 100u),
            (unsigned)bahMaxGenMixUs, (unsigned)bahMaxFillUs,
            (unsigned)bahMeanUs,      (unsigned)(bahMeanPct / 100u), (unsigned)(bahMeanPct % 100u),
-           (unsigned)bahMaxBlockUs,  (unsigned)bahOverruns, (unsigned)bahCount);
+           (unsigned)bahMinBlockUs,  (unsigned)bahMaxBlockUs,
+           (unsigned)bahOverruns, (unsigned)bahCount,
+           (unsigned)bahShortWrites, (unsigned)bahShortBytes);
       // bahCount is also an independent check on the sample rate: it counts buffer
       // refills, so count * DMA_BUF_LEN / window seconds should come out at 44100.
       // If this number ever disagrees with the mixer() rate M0 measured, one of the
@@ -644,6 +662,14 @@ void regular_checks() {
     }
     bahMaxGenMixUs = 0; bahMaxFillUs = 0; bahMaxBlockUs = 0; bahMaxCpuUs = 0;
     bahSumCpuUs = 0; bahCount = 0; bahOverruns = 0;
+    // Reset the minimum to its "no data" value, NOT to zero. Zero is a legitimate
+    // measurement -- it means I2S.write() never had to wait -- so starting the next window
+    // at zero would report a fake minimum for the first buffer and hide the one number
+    // this statistic exists to expose.
+    bahMinBlockUs = 0xFFFFFFFFu;
+    // bahShortWrites and bahShortBytes are deliberately NOT reset. They are cumulative
+    // since boot and the print above says so, because a single dropped buffer three
+    // minutes ago is still a dropped buffer.
   }
 #endif
 

@@ -192,6 +192,26 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
   extern volatile uint32_t bahOverruns;      // buffers whose CPU cost exceeded the period
   extern volatile uint32_t bahFillUs;        // hand-off from i2s_output() to audio_task1
   extern volatile uint32_t bahBlockUs;
+  // bahShortWrites is the only DIRECT underrun measurement here, and the one that
+  // matters. I2S.write() returns how many bytes it accepted; anything less than a whole
+  // buffer means the DMA was not handed its data in time, i.e. audio was genuinely
+  // dropped. Everything else in this file is inference from timings; this is the API
+  // telling us outright.
+  //
+  // It is here, and not only under M0_DIAG, because bahOverruns -- which is what the
+  // first measurement round was judged on -- turns out NOT to be a fault signal. A
+  // buffer costing more than the period is repaid by the slack in the buffers after it,
+  // so overruns > 0 is a budget warning, not proof of a dropout. The first bench run
+  // (2026-10-02) logged 11 overruns in 29 windows and the noise stayed fixed, which is
+  // exactly the distinction that needed proving.
+  extern volatile uint32_t bahShortWrites;   // cumulative, NOT reset per window
+  extern volatile uint32_t bahShortBytes;
+  // bahMinBlockUs: the tail of the backpressure. Steady state the task works ~594 us,
+  // then blocks ~131 us waiting for the DMA to free a slot, so this normally sits near
+  // that. A reading of 0 means I2S.write() returned without ever waiting, i.e. there was
+  // no slack left at that instant. Still inference rather than proof, which is why it is
+  // reported next to the short-write count and not instead of it.
+  extern volatile uint32_t bahMinBlockUs;
 #endif
 
 float bpm = 130.0f;
