@@ -341,3 +341,137 @@ print()
 print("  jitter 2000 us is far worse than loop() actually is (it spins at priority 1 with")
 print("  only a taskYIELD() between passes and nothing in regular_checks() blocks, so its")
 print("  detection error is well under a millisecond), and the clock still holds.")
+
+# ===================================================================== report arithmetic
+print()
+print("=" * 78)
+print("report arithmetic: the numbers seq_report() prints")
+print("=" * 78)
+print()
+print("  Added after the device's first report came back reading")
+print()
+print("      mean 59464.00 us vs nominal 125000 us (+0 us)")
+print()
+print("  which is self-contradictory: 240 steps in a 30 s window at a 125000 us step is")
+print("  exactly on time, and the (+0 us) in the same line said so. The mean was computed")
+print("  in 16.16 fixed point --")
+print()
+print("      uint32_t meanFP = (uint32_t)(((uint64_t)elapsedUs << 16) / steps);")
+print()
+print("  -- which requires (realMeanUs << 16) to fit a uint32_t. At 120 BPM that is")
+print("  125000 << 16 = 8,192,000,000 against a ceiling of 4,294,967,295. The numerator was")
+print("  widened to 64 bits and the quotient was still truncated on the way back down.")
+print("  8,192,000,000 mod 2**32 = 3,897,032,704, >> 16 = 59464 exactly: the shipped bug")
+print("  reproduced bit for bit rather than being approximately wrong.")
+print()
+print("  What is checked here is the arithmetic seq_report() actually does now:")
+print()
+print("      meanInt  = elapsedUs / steps")
+print("      meanFrac = ((elapsedUs % steps) * 100) / steps")
+print()
+print("  against the old 16.16 form, over every tempo seq_setTempo() accepts.")
+print()
+
+MIN_BPM, MAX_BPM = 20, 300
+REPORT_S = 30
+
+
+def mean_new(elapsed_us, steps):
+    """The shipped form: integer division plus a separate remainder."""
+    return elapsed_us // steps, ((elapsed_us % steps) * 100) // steps
+
+
+def mean_old_16_16(elapsed_us, steps):
+    """What shipped before the fix, faithfully including the uint32 truncation."""
+    fp = ((elapsed_us << 16) // steps) & 0xFFFFFFFF
+    return fp >> 16, ((fp & 0xFFFF) * 100) >> 16
+
+
+def steps_in_window(interval, window_s):
+    """How many steps land in the window, the way the clock actually accumulates them.
+
+    The window opens immediately after a step fires -- seq_report() is called at the end of
+    seq_poll(), and seqRepLastMs is stamped there -- and closes on the first step to reach
+    SEQ_REPORT_MS. So both ends are step boundaries and the count is the interval count,
+    rounded, not floor+1. At 120 BPM that is 240 steps for a 30 s window, which is what the
+    device printed; getting this wrong by one would have made the ground truth below wrong
+    in the same direction as the bug under test.
+    """
+    return max((window_s * 1_000_000 + interval // 2) // interval, 1)
+
+
+print("  %-6s %-10s %-7s %-14s %-14s %-8s %-8s" % (
+    "BPM", "interval", "steps", "true mean", "new (int.frac)", "new", "old 16.16"))
+print("  " + "-" * 72)
+
+bad_new = []
+bad_old = []
+for bpm in range(MIN_BPM, MAX_BPM + 1):
+    interval = 60_000_000 // (bpm * 4)
+    elapsed_us = REPORT_S * 1_000_000
+    steps = steps_in_window(interval, REPORT_S)
+    true_mean = elapsed_us / steps
+
+    ni, nf = mean_new(elapsed_us, steps)
+    oi, of = mean_old_16_16(elapsed_us, steps)
+    # Truncation, not rounding: the printed value is always <= the true mean, by < 0.01 us.
+    new_err = (ni + nf / 100) - true_mean
+    old_err = (oi + of / 100) - true_mean
+    if new_err < -0.0100001 or new_err > 1e-9:
+        bad_new.append((bpm, interval, steps, true_mean, new_err))
+    if abs(old_err) > 1.0:
+        bad_old.append((bpm, interval, steps, true_mean, old_err))
+
+    if bpm in (20, 50, 100, 120, 150, 200, 228, 229, 300):
+        print("  %-6d %-10d %-7d %-14.2f %-14s %-8s %-8s" % (
+            bpm, interval, steps, true_mean, "%d.%02d" % (ni, nf),
+            "ok", "ok" if abs(old_err) <= 1.0 else "WRONG"))
+
+print()
+print("  new arithmetic: wrong at %d of %d tempi" % (len(bad_new), MAX_BPM - MIN_BPM + 1))
+for row in bad_new[:5]:
+    print("      BPM %d interval %d steps %d: printed off by %+.4f us" % row)
+print("  old 16.16    : wrong at %d of %d tempi" % (len(bad_old), MAX_BPM - MIN_BPM + 1))
+if bad_old:
+    print("      every one of them is at or below BPM %d -- which is exactly the predicted"
+          % max(r[0] for r in bad_old))
+    print("      threshold, since realMeanUs << 16 stops fitting at 65535 us and the step is")
+    print("      already below that at about 229 BPM.")
+print()
+
+# The other drift number in the same print, which the 16.16 bug never touched.
+print("  windowErrUs = elapsedUs - steps*interval is computed independently, in plain")
+print("  integers, and is unaffected by any of the above. Both numbers are checked against")
+print("  the same ground truth here so that a fix to one cannot quietly invalidate the")
+print("  other:")
+print()
+print("  %-6s %-10s %-7s %-14s %s" % ("BPM", "interval", "steps", "windowErrUs", "verdict"))
+print("  " + "-" * 56)
+err_bad = 0
+for bpm in range(MIN_BPM, MAX_BPM + 1):
+    interval = 60_000_000 // (bpm * 4)
+    elapsed_us = REPORT_S * 1_000_000
+    steps = steps_in_window(interval, REPORT_S)
+    # steady tempo: the window should close on its own step boundary, so this stays sub-step
+    window_err_us = elapsed_us - steps * interval
+    if abs(window_err_us) > interval:
+        err_bad += 1
+    if bpm in (20, 120, 300):
+        print("  %-6d %-10d %-7d %-14d %s" % (
+            bpm, interval, steps, window_err_us,
+            "ok" if abs(window_err_us) <= interval else "*** OUT OF RANGE ***"))
+print()
+print("  |windowErrUs| stays under one step interval at all %d tempi (%d bad)."
+      % (MAX_BPM - MIN_BPM + 1, err_bad))
+print()
+print("  At 120 BPM this model reproduces the device exactly: 240 steps, mean 125000.00 us,")
+print("  windowErrUs +0 us. Those are the numbers the real report printed apart from the")
+print("  broken mean field, which is the point -- the ground truth here is anchored to a")
+print("  measurement, not chosen to suit the code.")
+print()
+print("  " + "-" * 72)
+print("  REPORT ARITHMETIC: %s" % ("ALL PASS" if not bad_new else "*** FAIL ***"))
+print("  (the 16.16 column being wrong is the finding under test, not a failure here;")
+print("   only the shipped arithmetic is a pass/fail criterion)")
+if bad_new:
+    raise SystemExit(1)

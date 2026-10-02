@@ -805,13 +805,36 @@ static void seq_report() {
     return;
   }
 
-  // Mean realized step period, in 16.16 fixed point. 64-bit on the numerator because
-  // elapsedUs << 16 overflows 32 bits past about 65 seconds, and this is called exactly
-  // when elapsed is 30 s -- which is the kind of boundary that works until the day someone
-  // raises SEQ_REPORT_MS to 60.
-  uint32_t meanFP  = (uint32_t)(((uint64_t)elapsedUs << 16) / (uint64_t)stepsInWin);
-  uint32_t meanInt = meanFP >> 16;
-  uint32_t meanFrac = ((meanFP & 0xFFFFUL) * 100UL) >> 16;
+  // Mean realized step period. Integer division plus a separate remainder, NOT 16.16 fixed
+  // point.
+  //
+  // The fixed point was here and it was wrong, and how it was wrong is worth writing down
+  // because the shape of the bug looks correct. Scaling by 2^16 to keep two decimals needs
+  // (realMeanUs << 16) to fit the 32 bits of a uint32_t. It does not, at any tempo this
+  // report is used at. At 120 BPM the step is 125000 us, and 125000 << 16 = 8,192,000,000
+  // against a ceiling of 4,294,967,295. The old code widened the numerator to 64 bits,
+  // which fixed the multiply and left the quotient truncated on the way back down.
+  //
+  // The first report off the device read "mean 59464.00 us vs nominal 125000 us". That is
+  // exactly the low 32 bits of 8,192,000,000 -- 3,897,032,704 -- shifted back down, so it
+  // reproduced bit for bit rather than merely being near some wrong number. The real mean
+  // was 125000, i.e. exact, and it was being reported as 48% of nominal. Truncation to a
+  // power-of-two divisor produces a plausible-looking small integer, which is why nothing
+  // about it read as broken at a glance.
+  //
+  // It breaks below about 228 BPM and seq_setTempo() accepts 20..300, so most of the range
+  // printed a wrong mean. Note what did NOT break, in the same line: windowErrUs below is
+  // computed independently in plain integer arithmetic and read +0 us on that very report.
+  // Two drift numbers side by side, one right and one wrong, and only one of them is
+  // trustworthy -- so the fix is the arithmetic, not the print format.
+  //
+  // Bounds, so neither half can overflow. elapsedUs is millis() * 1000 for a 30 s window:
+  // fits uint32 to about 71 minutes, and SEQ_REPORT_MS is 30 s. meanInt <= elapsedUs.
+  // meanFrac: the remainder is strictly below stepsInWin, so times 100 stays under
+  // stepsInWin * 100 -- about 60,000 at the fastest tempo seq_setTempo() accepts, two
+  // orders of magnitude inside uint32. No 64-bit needed anywhere here.
+  uint32_t meanInt  = elapsedUs / stepsInWin;
+  uint32_t meanFrac = ((elapsedUs % stepsInWin) * 100UL) / stepsInWin;
 
   // Signed error of the whole window: real time that elapsed minus the time the clock
   // claims it spent. Bounded arithmetic -- stepsInWin * seq.interval cannot overflow uint32
