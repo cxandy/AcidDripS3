@@ -52,7 +52,7 @@
  * reading exactly as healthy as it is now. Three or four readings would look perfect with the
  * whole feature missing.
  */
-#define SEQ_FX_SELFTEST 1
+#define SEQ_FX_SELFTEST 0
 
 #define SEQUENCER               // the 16-step sequencer: M2, supersedes JUKEBOX
 #define SEQUENCER_PLAY_ON_START // start playing at boot. There is no pad UI until M3, so
