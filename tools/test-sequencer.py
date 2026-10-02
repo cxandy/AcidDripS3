@@ -1033,3 +1033,92 @@ print("    - that seq_subPoll() is reached at all on hardware, and that the drai
 print("      seq_subFire() actually holds the gate at depth 1 in the engine. Both need a")
 print("      build with SEQ_FX_SELFTEST 1 and a serial capture: the prediction is 45 sub-hits")
 print("      per 30 s window with `held a/s 1/0`. Offline arithmetic cannot reach either.")
+
+# ===================================================================== declaration / definition agreement
+#
+# Written because CI 36974920807 rejected this milestone for a two-character edit: the
+# definition of seq_portaSpeed() was widened to uint32_t while its declaration in
+# sequencer.h stayed uint8_t.
+#
+#     sequencer.ino:895:10: error: ambiguating new declaration of 'uint32_t seq_portaSpeed()'
+#
+# A declaration and a definition of the same function with different return types are two
+# overloads of a zero-argument function, and there is nothing between them to overload -- which
+# is why the diagnostic says "ambiguating new declaration" rather than the more obvious
+# "conflicting return type", and why it took a compiler to find it.
+#
+# What this cannot do is substitute for the compiler. It compares tokens, so it sees
+# signature drift and nothing else: not overload resolution, not template rules, not whether
+# the body agrees with the declaration's parameter names, not types at all inside the
+# parameter lists. It is here because this class of edit -- widen a return type on one side of
+# a declaration pair -- is easy to make by accident and impossible to see by reading, and
+# because the only other instrument for it is a build.
+print()
+print("=" * 78)
+print("declaration / definition agreement: every seq_* signature, .h against .ino")
+print("=" * 78)
+
+
+def norm_type(t):
+    return re.sub(r"\s*\*\s*", "*", re.sub(r"\s+", " ", t)).strip()
+
+
+def collect_decl(src):
+    out = {}
+    for m in re.finditer(r"^([A-Za-z_][A-Za-z0-9_ \t\*]*?)\b(seq_[A-Za-z0-9_]+)\s*\([^;]*\)\s*;",
+                         src, re.M):
+        out[m.group(2)] = norm_type(m.group(1))
+    return out
+
+
+def collect_def(src):
+    """Definitions only, and only the externally-visible ones.
+
+    `static` definitions are file-local by definition and must NOT appear in the header, so
+    including them here reported twelve false orphans on the first run -- seq_subFire,
+    seq_resolvePitch and ten others that are correctly private. A check whose first run
+    produces a wall of failures is a check nobody will keep, and the correct response to that
+    is to fix the check rather than to argue that the failures were interesting.
+    """
+    out = {}
+    for m in re.finditer(r"^([A-Za-z_][A-Za-z0-9_ \t\*]*?)\b(seq_[A-Za-z0-9_]+)\s*\([^;{]*\)\s*\{",
+                         src, re.M):
+        if norm_type(m.group(1)).startswith("static"):
+            continue
+        out[m.group(2)] = norm_type(m.group(1))
+    return out
+
+
+if phsrc and psrc:
+    decls, defs = collect_decl(phsrc), collect_def(psrc)
+    shared = sorted(set(decls) & set(defs))
+    print()
+    print("  %-24s %-18s %-18s %s" % ("function", "sequencer.h", "sequencer.ino", ""))
+    print("  " + "-" * 68)
+    mismatch = []
+    for nm in shared:
+        ok = decls[nm] == defs[nm]
+        if not ok:
+            mismatch.append(nm)
+        print("  [%s] %-20s %-18s %-18s"
+              % ("ok" if ok else "MISMATCH", nm, decls[nm], defs[nm]))
+    print()
+    check("all %d shared signatures agree on return type" % len(shared),
+          not mismatch, "mismatched: %s" % (mismatch or "none"))
+    print()
+    print("  Declared in sequencer.h with no definition in sequencer.ino, and vice versa.")
+    print("  A declared-but-undefined seq_* would be a link error; a defined-but-undeclared one")
+    print("  would mean a header that lies about its own interface, which is worse because it")
+    print("  compiles until someone includes it from a second translation unit.")
+    orphan_d = sorted(set(decls) - set(defs))
+    orphan_f = sorted(set(defs) - set(decls))
+    check("no seq_* is declared without a definition", not orphan_d, str(orphan_d or "none"))
+    check("no seq_* is defined without a declaration", not orphan_f, str(orphan_f or "none"))
+    print()
+    print("  Limits of this check, stated rather than left to be discovered:")
+    print("    - tokens only. It cannot see whether the body honours the declared type.")
+    print("    - it cannot check the parameter lists, only the leading return type.")
+    print("    - it does not replace a compiler. CI is the authority; this is a fast local")
+    print("      check for the one drift that CI found the expensive way.")
+else:
+    check("sources readable", False)

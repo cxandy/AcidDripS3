@@ -892,15 +892,36 @@ void seq_setPortaSpeed(uint8_t speed) {
   eng_setParam(Ch::Acid, CC_303_PORTATIME, SEQ_PORTA_CC[speed - 1]);
 }
 
-uint32_t seq_portaSpeed() { return seq.portaSpeed; }
+// uint8_t here and in sequencer.h. An intermediate commit of this milestone widened the
+// definition to uint32_t while the declaration stayed uint8_t, and CI 36974920807 rejected it:
+//
+//     sequencer.ino:895:10: error: ambiguating new declaration of 'uint32_t seq_portaSpeed()'
+//
+// A declaration and a definition of the same function with different return types are two
+// overloads of a zero-argument function, and there is nothing to overload between -- hence
+// "ambiguating new declaration" rather than the more obvious "conflicting return type".
+//
+// Worth noting how it got in: the two were identical at 60e2f7f, so nothing could complain
+// before the edit, and the edit was made on the line above the drift accessors under the belief
+// that it would read as tidying. It is the same failure mode as f464c01 -- a two-character edit
+// to a signature -- and the only reason it cost a CI run rather than a debugging session is
+// that CI ran.
+//
+// On "the offline suite could not have caught this, because it reads text": that was written
+// as an excuse and it was wrong. A text-level comparison of declared against defined return
+// type catches this bug exactly right, needs no compiler, and now does -- tools/test-sequencer.py
+// has a signature-agreement section that walks all 25 seq_* pairs and fails on this one.
+// Recording a limitation because it is convenient is the same error as recording a capability
+// that was never exercised; the honest version of both is to go and find out.
+uint8_t seq_portaSpeed() { return seq.portaSpeed; }
 
 uint32_t seq_driftMaxUs()  { return seq.driftMaxUs; }
 uint32_t seq_stepsPlayed() { return seq.stepsPlayed; }
 void     seq_driftReset()  { seq.driftMaxUs = 0; seq.driftLastUs = 0; seq.catchups = 0; }
 
-uint32_t seq_subHits()    { return seq.subHits; }
+uint32_t seq_subHits()     { return seq.subHits; }
 uint32_t seq_subMaxErrUs() { return seq.subMaxErrUs; }
-uint32_t seq_subDropped() { return seq.subDropped; }
+uint32_t seq_subDropped()  { return seq.subDropped; }
 
 const char *seq_fxName(uint8_t fx) {
   // V5's own eight strings, from the UI table at Acid_Drip_Drum_Acid_Drift_V5.ino:1128,
