@@ -463,6 +463,309 @@ static void seq_triggerSecond(uint8_t step, uint8_t idx) {
 }
 
 // =====================================================================
+// STEP EFFECTS -- M2.5
+//
+// A macro that is not defined inside #if is not a compile error. It is a 0, and this file
+// would then ship with the selftest harness silently absent and every run of it reporting
+// "fx 0 hits" as though that meant something. Named out loud instead of trusted; config.h is
+// included at the top of this file and this line is what keeps that true rather than
+// accidental.
+#ifndef SEQ_FX_SELFTEST
+#error "SEQ_FX_SELFTEST not visible: config.h must be included before the M2.5 code"
+#endif
+//
+// V5's eight, split into two kinds that need two different mechanisms:
+//
+//   - WHAT effects (OctUp, the four chord steps) change the pitch and can be resolved
+//     entirely before the note-on is posted. They are a lookup and an addition.
+//   - WHEN effects (Retrig, Stutter) fire extra hits INSIDE a step, so they cannot be
+//     turned into a note-on at step time and need a schedule the clock polls.
+//
+// V5 implemented both as one bare uint8_t in a Step struct with an if-chain for the pitch
+// and, for the timing, edge detection inside a 256 Hz loop. The edge detection is the part
+// that had to be rebuilt rather than copied; the reasoning is on seq_subPoll().
+// =====================================================================
+
+/* V5's arpeggio table, verbatim: Acid_Drip_Drum_Acid_Drift_V5.ino:780-785.
+ *
+ * NOTE ON A POINTER IN THE DESIGN DOC: ESP32S3_FUSION_IMPLEMENTATION.md:361 says the
+ * interval table is at "主 sketch:2176-2210". It is not. That range is
+ * ch2NearestScaleSemi() and ch2KbIntervalSemis() -- channel 2's scale-following key-mode
+ * logic, a different feature that also deals in semitone intervals. The real table is at
+ * :780-785, and the per-effect comments at :2930-2939 agree with it exactly, which is two
+ * independent sources rather than one.
+ *
+ * Indexed [effect - SEQ_FX_MAJSTEP][step % 4]: root, third, fifth, octave. Four is the
+ * octave on purpose -- it is the same as the root, so a four-step chord walk ends where it
+ * started an octave up and the pattern's identity survives a full bar.
+ */
+static const int8_t SEQ_CHORD_INTERVAL[4][4] = {
+  { 0,  4,  7, 12 },   // SEQ_FX_MAJSTEP  -- major
+  { 0,  3,  7, 12 },   // SEQ_FX_MINSTEP  -- minor
+  { 0,  4,  7, 11 },   // SEQ_FX_DOM7STEP -- dominant 7th
+  { 0,  3,  6,  9 }    // SEQ_FX_DIMSTEP  -- diminished
+};
+
+/* Sub-step schedules, in 64ths of a step. V5's offsets, unchanged.
+ *
+ * V5 detects these by polling a fraction -- `micron = elapsed * 64 / interval` clamped to
+ * 0..63, firing when it crosses 32 (Retrig) or 21 and 42 (Stutter), V5 :6229-6249. The
+ * fractions are reproduced here as absolute offsets from the step's own nominal time.
+ */
+static const uint8_t SEQ_SUB_COUNT[8] = {
+  0, 0, 1, 2, 0, 0, 0, 0
+};
+static const uint8_t SEQ_SUB_OFF[8][2] = {
+  {  0,  0 },   // None
+  {  0,  0 },   // OctUp
+  { 32,  0 },   // Retrig -- 32/64 = exactly half a step
+  { 21, 42 },   // Stutter -- 21/64 = 32.8%, 42/64 = 65.6%. NOT 1/3 and 2/3: 21.33 and 42.67
+                // are not integers and V5 picked the integers. Reproducing the rounding is
+                // the point -- "about a third" is what it sounds like, and a cleaner third
+                // would be a different effect.
+  {  0,  0 },   // MajStep
+  {  0,  0 },   // MinStep
+  {  0,  0 },   // Dom7Step
+  {  0,  0 }    // DimStep
+};
+
+/* Whether a sub-hit inherits the step's accent. V5 :6239 against :6246:
+ *
+ *     Retrig:   triggerNote(rni, seq.steps[seq.cur].accent, false)
+ *     Stutter:  triggerNote(rni, false,                            false)
+ *
+ * The asymmetry is deliberate in V5 and is reproduced rather than tidied. An accent is a
+ * filter-envelope hit (CC 75 plus velocity, per seq_triggerNote), so an accented stutter
+ * sweeps the filter three times inside one step, which reads as a machine-gun sweep rather
+ * than as a stutter. Retrig doubles a note that was already accented and stays musical,
+ * because two accent hits 62 ms apart still sound like one phrase.
+ */
+static const bool SEQ_SUB_KEEP_ACCENT[8] = {
+  false, false, true, false, false, false, false, false
+};
+
+/* Resolve a step's effect into the V5 pattern index to actually sound.
+ *
+ * V5's whole pitch-side effect handling, in order (V5 :2924-2948):
+ *
+ *     baseNote = constrain(scaleNote(cur) + trans, 0, 59);
+ *     if      (effect == 1) baseNote = constrain(baseNote + 12, 0, 59);   // Oct Up
+ *     ni = baseNote;
+ *     if      (effect == 4) ni = baseNote + arpeggio[0][cur % 4];
+ *     else if (effect == 5) ni = baseNote + arpeggio[1][cur % 4];
+ *     else if (effect == 6) ni = baseNote + arpeggio[2][cur % 4];
+ *     else if (effect == 7) ni = baseNote + arpeggio[3][cur % 4];
+ *     else seq.arpPos = 0;
+ *
+ * Oct Up adjusts baseNote and the chord branch then READS baseNote, so as written they
+ * compose. They never do in V5 -- one effect byte per step -- so the distinction is
+ * unobservable in shipped content either way. Written V5's way so that a future combined
+ * effect does not need this function re-read.
+ *
+ * ON V5'S 0..59 CLAMP, which is deliberately NOT ported: it is a bound on noteFreq[60], not
+ * a musical decision. This port's index runs 0..255 and the transposition is applied later,
+ * by seq_noteToMidi(). Clamping here would clip pitches that are valid MIDI, and would clamp
+ * BEFORE transposition, which V5 did not do either.
+ *
+ * Whether dropping it is observable is measured rather than assumed: the eight presets span
+ * indices 24..39, the largest offset any effect adds is +12, so the worst case is 51 --
+ * inside V5's 59. V5's clamp never binds on any shipped pattern, ported or walked. The one
+ * clamp left is seq_noteToMidi()'s, on the final MIDI note, which is the one that is actually
+ * about MIDI.
+ *
+ * The clamp to 255 below is only the return type's width. That is a type guard, not a pitch
+ * decision, and every real index is far below it.
+ */
+static uint8_t seq_resolvePitch(uint8_t idx, uint8_t fx, uint8_t step) {
+  if (fx >= SEQ_NUM_FX) { fx = SEQ_FX_NONE; }
+
+  int16_t n = (int16_t)idx;
+  if (fx == SEQ_FX_OCTUP) { n += 12; }
+
+  if (fx >= SEQ_FX_MAJSTEP && fx <= SEQ_FX_DIMSTEP) {
+    // `step & 3` rather than `step % 4`: step is a uint8_t that is never negative, and a
+    // modulo on the promoted signed type would cost a real division for the same answer.
+    n += (int16_t)SEQ_CHORD_INTERVAL[fx - SEQ_FX_MAJSTEP][step & 3];
+  }
+
+  if (n < 0)   { n = 0; }
+  if (n > 255) { n = 255; }
+  return (uint8_t)n;
+}
+
+/* Nominal time of a sub-hit, as an offset from the start of the step that owes it.
+ *
+ * 64ths, not a per-effect table of microsecond values, because the step length is not known
+ * until the tempo is and V5's offsets are defined as fractions. At 120 BPM a 16th is 125000
+ * us, so 32/64 is 62500 us exactly and 21/64 is 41015 us.
+ *
+ * Overflow: seq_setTempo()'s floor of 20 BPM puts the interval at 60000000/20/4 = 750000 us,
+ * and the largest offset is 42, so the product tops out at 31,500,000 -- inside uint32 with
+ * two orders of magnitude to spare. No 64-bit arithmetic needed, and none used: this file's
+ * own periodic report had a 16.16 overflow in it once already (see seq_report()).
+ *
+ * Rounding: integer division truncates, so a hit is scheduled at most 1 us EARLY and never
+ * late. V5's crossing test, elapsed*64/interval >= k, is quantised to whole microseconds the
+ * same way, so this matches V5's own granularity rather than departing from it.
+ */
+static uint32_t seq_subOffsetUs(uint8_t off) {
+  return (uint32_t)((uint32_t)seq.interval * (uint32_t)off / 64UL);
+}
+
+static uint32_t seq_subDueUs(uint8_t off) {
+  return seq.subStepUs + seq_subOffsetUs(off);
+}
+
+/* Arm, or cancel, the sub-step schedule for the step firing now.
+ *
+ * Called unconditionally once per step, so a step with no timed effect also drops whatever
+ * the previous step left pending. The alternative is a schedule that outlives its step, and
+ * the symptom of that is a note from the previous bar landing in the middle of this one.
+ */
+static void seq_subArm(const SeqStep *s) {
+  // Counted rather than asserted. The largest offset is 42/64, so a pending hit is always due
+  // before the next boundary unless loop() was blocked for a whole interval -- which is a
+  // claim about loop(), and this is a measurement of it.
+  if (seq.subIdx < seq.subCount) {
+    seq.subDropped += (uint32_t)(seq.subCount - seq.subIdx);
+  }
+
+  seq.subCount = 0;
+  seq.subIdx   = 0;
+  seq.subFx    = SEQ_FX_NONE;
+
+  if (!s->active || s->effect >= SEQ_NUM_FX) { return; }
+
+  uint8_t n = SEQ_SUB_COUNT[s->effect];
+  if (n == 0) { return; }
+
+  seq.subCount  = n;
+  seq.subIdx    = 0;
+  seq.subFx     = s->effect;
+  // Copies, so that a preset load or a pad gesture landing between the step and its sub-hits
+  // cannot redirect a pending hit at a note the pattern no longer holds.
+  seq.subNote   = s->note;
+  seq.subStep   = seq.cur;
+  seq.subAccent = s->accent;
+  seq.subStepUs = seq.lastUs;   // nominal time of THIS step, already advanced past by seq_poll()
+}
+
+/* Fire one scheduled sub-hit. */
+static void seq_subFire() {
+  // Lateness against this hit's own nominal time, taken BEFORE the post below, so the number
+  // measures the clock rather than the queue write that follows it.
+  int32_t late = (int32_t)(micros() - seq_subDueUs(SEQ_SUB_OFF[seq.subFx][seq.subIdx]));
+  if (late > 0) {
+    uint32_t mag = (uint32_t)late;
+    if (mag > seq.subMaxErrUs) { seq.subMaxErrUs = mag; }
+  }
+
+  // THE DRAIN -- the part V5 does not have and this port must, and the whole reason a
+  // sub-step effect needs a note-off at all.
+  //
+  // V5 has no gate. triggerNote() sets gVolSub, sets the filter envelope and zeroes the
+  // oscillator phase; the note then keeps sounding until the next trigger rewrites it. There
+  // is no note-off anywhere in the path, which is why V5 has no held-note stack, which is why
+  // V5 has no `slide = (mvaStack.n > 1)`, and therefore why a V5 retrigger needs nothing
+  // special to retrigger.
+  //
+  // synthvoice.ino decides legato from stack depth (synthvoice.ino:225), so a sub-hit that
+  // posted a bare note-on would take the depth to 2 and the SUB-HIT ITSELF would become
+  // legato: no envelope retrigger, and CC 65 left armed for whatever came next. Both are the
+  // degradation recorded in HANDOFF 6.4.2, arrived at from the opposite direction. Draining
+  // first is what makes this a retrigger rather than a second voice.
+  seqAcidReleaseAll();
+
+  uint8_t pitch = seq_resolvePitch(seq.subNote, seq.subFx, seq.subStep);
+  bool    acc   = SEQ_SUB_KEEP_ACCENT[seq.subFx] ? seq.subAccent : false;
+  seq_triggerNote(pitch, acc, false);   // glide = false for both effects, as in V5
+
+  seq.subHits++;
+  seq.subIdx++;
+}
+
+/* Fire every sub-hit that is due. Called on every pass of seq_poll().
+ *
+ * THIS IS A REBUILD, NOT A COPY, and the reason is worth writing down, because V5's version
+ * works and looks like it ports.
+ *
+ * V5 polls a sub-step position from updateControl() and fires on an EDGE crossing:
+ *
+ *     if (micron >= 21 && lastMicron < 21) triggerNote(...);
+ *
+ * That is fine at 256 Hz and it has two properties this port will not accept:
+ *
+ *   1. It can MISS a hit. If the loop is late enough to jump from micron 15 to 40 in one
+ *      pass, the crossing of 21 is never observed, the `lastMicron < 21` half of the test is
+ *      false at both samples, and the stutter silently becomes a plain note. A missed
+ *      threshold is a different failure from a late hit, and a much harder one to notice --
+ *      there is nothing in the log to say a hit went missing.
+ *
+ *   2. Its timing error is the loop period, not the schedule. At 256 Hz that is 3.9 ms of
+ *      quantisation on a hit meant to land 41 ms into a 125 ms step, and every hit in a
+ *      stutter quantised independently, so the pair wobbles against each other.
+ *
+ * Scheduling against the step's own nominal time has neither problem: a hit that comes due
+ * while loop() was blocked fires late but still fires, and it inherits the main clock's
+ * no-accumulation property because each offset is computed from subStepUs rather than added
+ * to the previous hit. The trade is the one below -- a late poll can deliver two hits in one
+ * pass -- which is handled by draining between them, and is a far lesser failure than dropping
+ * one silently.
+ */
+static void seq_subPoll(uint32_t us) {
+  // `while`, not `if`: being more than one sub-step late makes two hits due at once, and
+  // firing both is closer to the truth than firing one and skipping the other. Bounded by
+  // subCount, which is at most 2.
+  while (seq.subIdx < seq.subCount &&
+         (int32_t)(us - seq_subDueUs(SEQ_SUB_OFF[seq.subFx][seq.subIdx])) >= 0) {
+    seq_subFire();
+  }
+}
+
+/* The M2.5 resolution table, printed once at seq_start().
+ *
+ * Eight effects that no shipped preset uses, described only in source comments, is a feature
+ * nobody can check. This puts what each one resolves to -- on the device, at the interval
+ * actually running -- into the serial log, which is the instrument this project has verified
+ * everything else with since M0.
+ *
+ * The chord steps print as a phase table rather than one line each, because at any single
+ * phase they are nearly indistinguishable: MajStep and Dom7Step are both +4 at cur%4==1, and
+ * MinStep and DimStep are both +3 there too. The table diverges as the step number moves, and
+ * that divergence is the entire audible difference between the four.
+ */
+static void seq_fxDump() {
+  const uint8_t REF = 24;   // V5's C2, and the register every preset is written in
+
+  DEBF("[M2.5] step effects, %u BPM, interval %lu us, reference index %u:\r\n",
+       (unsigned)seq.tempo, (unsigned long)seq.interval, (unsigned)REF);
+
+  for (uint8_t k = 0; k < 4; k++) {
+    uint8_t fx = (uint8_t)(SEQ_FX_MAJSTEP + k);
+    DEBF("[M2.5]   %u %-8s cur%%4 0..3: ", (unsigned)fx, seq_fxName(fx));
+    for (uint8_t p = 0; p < 4; p++) {
+      DEBF("%+3d ", (int)SEQ_CHORD_INTERVAL[k][p]);
+    }
+    DEBF("\r\n");
+  }
+
+  for (uint8_t fx = 0; fx < SEQ_NUM_FX; fx++) {
+    uint8_t idx = seq_resolvePitch(REF, fx, 0);
+    DEBF("[M2.5]   %u %-8s idx %u -> midi %u, sub ", (unsigned)fx, seq_fxName(fx),
+         (unsigned)idx, (unsigned)seq_noteToMidi(idx));
+    if (SEQ_SUB_COUNT[fx] == 0) {
+      DEBF("-\r\n");
+      continue;
+    }
+    for (uint8_t k = 0; k < SEQ_SUB_COUNT[fx]; k++) {
+      DEBF("%s%u/64 = %lu us", (k ? ", " : ""),
+           (unsigned)SEQ_SUB_OFF[fx][k], (unsigned long)seq_subOffsetUs(SEQ_SUB_OFF[fx][k]));
+    }
+    DEBF("%s\r\n", SEQ_SUB_KEEP_ACCENT[fx] ? ", keeps accent" : ", accent forced off");
+  }
+}
+
+// =====================================================================
 // STEP FIRING
 // =====================================================================
 static void seq_advanceStep() {
@@ -497,7 +800,12 @@ static void seq_advanceStep() {
     // note-on becomes legato with no retrigger, which sounds like a tuning fault.
     if (!s->glide || seqAcidHeldN == 0) { seqAcidReleaseAll(); }
     seq_triggerDrums(seq.cur);
-    seq_triggerNote(s->note, s->accent, s->glide);
+
+    // M2.5: the effect resolves the pitch BEFORE the note-on, so OctUp and the chord steps
+    // cost nothing at trigger time -- they are a lookup and an addition on the way past. Only
+    // Retrig and Stutter need anything more, and that is what seq_subArm() below is for.
+    uint8_t pitch = seq_resolvePitch(s->note, s->effect, seq.cur);
+    seq_triggerNote(pitch, s->accent, s->glide);
   } else {
     // A rest still has to release. Skipping this holds the previous note for the length of
     // the whole loop, which on a 16-step pattern is two seconds of one note sounding
@@ -506,6 +814,15 @@ static void seq_advanceStep() {
     eng_setParam(Ch::Acid, CC_303_PORTAMENTO, 0);
     seq_triggerDrums(seq.cur);   // drums still play on a rest; that is what a rest means
   }
+
+  // Arm, or cancel, this step's sub-step schedule. Unconditional and last, so that a rest and
+  // a step with no timed effect both drop whatever the previous step left pending. A pending
+  // hit that survives its step would be a note from the previous bar arriving mid-bar.
+  //
+  // It is last rather than first so that seq.lastUs -- the step's nominal time, which
+  // seq_subArm copies -- is read after everything above has had its say and before anything
+  // below can change it.
+  seq_subArm(s);
 }
 
 // =====================================================================
@@ -575,11 +892,45 @@ void seq_setPortaSpeed(uint8_t speed) {
   eng_setParam(Ch::Acid, CC_303_PORTATIME, SEQ_PORTA_CC[speed - 1]);
 }
 
-uint8_t seq_portaSpeed() { return seq.portaSpeed; }
+uint32_t seq_portaSpeed() { return seq.portaSpeed; }
 
 uint32_t seq_driftMaxUs()  { return seq.driftMaxUs; }
 uint32_t seq_stepsPlayed() { return seq.stepsPlayed; }
 void     seq_driftReset()  { seq.driftMaxUs = 0; seq.driftLastUs = 0; seq.catchups = 0; }
+
+uint32_t seq_subHits()    { return seq.subHits; }
+uint32_t seq_subMaxErrUs() { return seq.subMaxErrUs; }
+uint32_t seq_subDropped() { return seq.subDropped; }
+
+const char *seq_fxName(uint8_t fx) {
+  // V5's own eight strings, from the UI table at Acid_Drip_Drum_Acid_Drift_V5.ino:1128,
+  // minus the spaces in V5's "Oct Up" / "Maj Step" -- a label that has to be compared against
+  // a number in a log reads better without them, and there is nowhere here that needs a label
+  // to line up with V5's on screen.
+  static const char *const NAMES[SEQ_NUM_FX] = {
+    "None", "OctUp", "Retrig", "Stutter", "MajStep", "MinStep", "Dom7Step", "DimStep"
+  };
+  return (fx < SEQ_NUM_FX) ? NAMES[fx] : "?";
+}
+
+void seq_setStepEffect(uint8_t step, uint8_t fx) {
+  if (step >= SEQ_NUM_STEPS) { step = 0; }
+  if (fx >= SEQ_NUM_FX)      { fx = SEQ_FX_NONE; }
+  if (seq.steps[step].effect == fx) { return; }
+  seq.steps[step].effect = fx;
+
+  // If the change landed mid-step, the pending schedule belongs to the effect that was just
+  // replaced, and leaving it would fire hits the new effect never asked for -- including, for
+  // a Retrig turned into a None, a retrigger of a note that should now be plain. Re-armed
+  // rather than merely cancelled, so that setting an effect is audible on the step you set it
+  // on instead of one step later.
+  if (step == seq.cur) { seq_subArm(&seq.steps[step]); }
+}
+
+uint8_t seq_stepEffect(uint8_t step) {
+  if (step >= SEQ_NUM_STEPS) { return SEQ_FX_NONE; }
+  return seq.steps[step].effect;
+}
 
 void seq_init() {
   // Seeded from micros() rather than from a fixed constant, because SEQ_ORDER_RANDOM with a
@@ -602,10 +953,44 @@ void seq_init() {
   seq.driftMaxUs  = 0;
   seq.driftLastUs = 0;
 
+  // M2.5. Zeroed here rather than left to a global initialiser, so that a warm restart --
+  // setup() called twice, which seq_init()'s own contract permits -- does not inherit a
+  // schedule armed by the previous run and fire it into the middle of the first bar.
+  seq.subCount    = 0;
+  seq.subIdx      = 0;
+  seq.subFx       = SEQ_FX_NONE;
+  seq.subNote     = 0;
+  seq.subStep     = 0;
+  seq.subAccent   = false;
+  seq.subStepUs   = 0;
+  seq.subHits     = 0;
+  seq.subMaxErrUs = 0;
+  seq.subDropped  = 0;
+
   seqAcidHeldN    = 0;
   seqSecondHeldOn = false;
 
   seq_loadPreset(0);
+
+#if SEQ_FX_SELFTEST
+  // M2.5 acceptance harness -- see the long note in config.h. One of each effect on the first
+  // eight steps of preset 0, and steps 8-15 left exactly as the preset has them.
+  //
+  // Eight is not arbitrary. Step 15 staying a plain active step is what keeps the report's
+  // "held a" reading at 1, so the existing M2 acceptance number stays comparable between a
+  // selftest build and a shipping build. And steps 0 and 1 carrying Retrig and Stutter make
+  // the sub-hit COUNT per bar exactly 3, so a 30 s window at 120 BPM -- 240 steps, 15 bars --
+  // has to read "fx 45 hits". 30 would mean the retrigger never fired; 60 would mean a
+  // stutter hit fired twice. The number is checkable from the log with nobody listening, which
+  // is the point: what is being verified is that the code runs at all, and code that runs
+  // says so in a number rather than in an opinion about how it sounded.
+  static const uint8_t FX_SELFTEST[8] = {
+    SEQ_FX_RETRIG, SEQ_FX_STUTTER, SEQ_FX_OCTUP,    SEQ_FX_MAJSTEP,
+    SEQ_FX_MINSTEP, SEQ_FX_DOM7STEP, SEQ_FX_DIMSTEP, SEQ_FX_NONE
+  };
+  for (uint8_t i = 0; i < 8; i++) { seq.steps[i].effect = FX_SELFTEST[i]; }
+  DEBF("[M2.5] SELFTEST: steps 0-7 carry fx 2,3,1,4,5,6,7,0 on preset 0\r\n");
+#endif
 
   // The accent depth is set ONCE, here, rather than per note. CC 76 is a patch parameter and
   // the sequencer has no business changing it every step -- unlike CC 75, which the accent
@@ -633,6 +1018,12 @@ void seq_start() {
   seq.rrPingFwd = true;
   seq_driftReset();
 
+  // Any schedule the stopped sequencer was holding is dropped, and NOT counted as dropped:
+  // it was cancelled by a stop, which is a decision, not a miss. Counting it would put a
+  // non-zero in a counter whose whole meaning is "a hit the clock lost".
+  seq.subCount = 0;
+  seq.subIdx   = 0;
+
   // The report window restarts here. Without this, stopping and restarting inside one 30 s
   // window would leave the first report counting steps from BOTH runs divided by an elapsed
   // time that covers only part of them -- which yields a plausible-looking mean interval
@@ -645,11 +1036,21 @@ void seq_start() {
   DEBF("[M2] seq start: %u steps, %u BPM (%lu us/step), slide %u -> %u ms\r\n",
        (unsigned)seq.len, (unsigned)seq.tempo, (unsigned long)seq.interval,
        (unsigned)seq.portaSpeed, (unsigned)SEQ_PORTA_CC[seq.portaSpeed - 1]);
+
+  // The effect resolution table, once per start. It is 13 lines and it is the only place in
+  // the whole firmware where the eight effects' actual behaviour is written down as data
+  // rather than as source, which is the difference between a feature that can be checked and
+  // a feature that has to be believed.
+  seq_fxDump();
 }
 
 void seq_stop() {
   if (!seq.running) { return; }
   seq.running = false;
+
+  // Cancelled, not counted as dropped -- see the note in seq_start(). A stop is a decision.
+  seq.subCount = 0;
+  seq.subIdx   = 0;
 
   // Silence through the event layer, like everything else, so the engine still has exactly
   // one writer. Going around it to the synths directly would reintroduce the very coupling
@@ -682,6 +1083,17 @@ void seq_poll() {
   if (!seq.running) { return; }
 
   uint32_t us = micros();
+
+  // M2.5: sub-step hits FIRST, before the step check below. Not an ordering preference --
+  // it is what keeps a hit attached to the step that owes it.
+  //
+  // A sub-hit at 21/64 or 42/64 is always due before the next step boundary, so in the normal
+  // case the order makes no difference. It matters when loop() was late enough that a sub-hit
+  // and the next boundary are both due in one pass: polling first keeps the sub-hit with its
+  // own step, whereas advancing first would re-arm the schedule from the new step and drop it
+  // into seq_subDropped. A late hit is recoverable; a silent one is not.
+  seq_subPoll(us);
+
   if ((uint32_t)(us - seq.lastUs) < seq.interval) { return; }
 
   // Nominal time of the step that is firing NOW, as opposed to the moment we noticed it.
@@ -850,9 +1262,17 @@ static void seq_report() {
   // held-note count for drums would be a concept that does not exist. It used to print that
   // 0 as if it were the third reading, next to two real numbers, which is exactly the shape
   // of thing a reader will quote as evidence. A slot that cannot be measured gets a dash.
+  //
+  // "fx N hits" is M2.5's presence proof, and it is here for the same reason: with the eight
+  // shipped presets -- every step SEQ_FX_NONE -- this number is 0 forever, and a report line
+  // that reads identically whether the sub-step scheduler runs or is not wired up at all is
+  // not measuring the feature. Three readings would then look healthy while one thing was
+  // missing. With SEQ_FX_SELFTEST it is 45 per 30 s window at 120 BPM and checkable from the
+  // log; without it, 0 is the correct and expected answer, and knowing which of those two
+  // builds produced a given log is a question the line itself now answers.
   DEBF("[M2] %lu s window: %lu steps, mean %lu.%02lu us vs nominal %lu us (%+ld us), "
        "max|err| %lu us, last %+ld us, catch %lu, total %lu, held a/s %u/%u (drums n/a), "
-       "prev print %lu us\r\n",
+       "prev print %lu us, fx %lu hits (max late %lu us, dropped %lu)\r\n",
        (unsigned long)(elapsedMs / 1000), (unsigned long)stepsInWin,
        (unsigned long)meanInt, (unsigned long)meanFrac,
        (unsigned long)seq.interval, (long)windowErrUs,
@@ -860,7 +1280,10 @@ static void seq_report() {
        (unsigned long)catchesInWin, (unsigned long)seq.stepsPlayed,
        (unsigned)eng_heldDepth(Ch::Acid),
        (unsigned)eng_heldDepth(Ch::Second),
-       (unsigned long)prevPrintUs);
+       (unsigned long)prevPrintUs,
+       (unsigned long)seq.subHits,
+       (unsigned long)seq.subMaxErrUs,
+       (unsigned long)seq.subDropped);
   seqRepPrintUs = micros() - t0;
 
   // Per-window, so "max |err|" in the next line covers the next window rather than
@@ -868,4 +1291,11 @@ static void seq_report() {
   // useless for spotting a regression, because it can never improve and never distinguishes
   // "bad once at boot" from "bad continuously".
   seq.driftMaxUs = 0;
+
+  // Same argument for the sub-step figure, and it matters MORE here, because a sub-step
+  // lateness that only ever occurs at boot would otherwise sit in the number forever and
+  // read as a permanent property of the scheduler. `fx` total and `dropped` are cumulative
+  // and are NOT reset: they are totals, not worst cases, and a total that resets is a total
+  // nobody can check against the step count beside it.
+  seq.subMaxErrUs = 0;
 }

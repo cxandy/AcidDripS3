@@ -42,10 +42,9 @@
  *     layer so the third trigger seam is real and exercised; the generator waits for
  *     a milestone that has a UI to configure it.
  *
- *   - Step effects (OctUp / Retrigger / Stutter / the four chord-step modes). The
- *     effect byte is carried in SeqStep and the presets already populate it, so M2.5
- *     is a switch statement rather than a data migration. That ordering is the design
- *     doc's own (M2.5, a separate day).
+ *   - Step effects (OctUp / Retrigger / Stutter / the four chord-step modes). Carried in
+ *     SeqStep, not acted on here. See the long note at the bottom of this file, which
+ *     corrects a claim this comment used to make and which was wrong.
  *
  *   - Everything that reads a pad, a pot or a TFT. Not in this milestone by design.
  */
@@ -70,13 +69,37 @@
 
 #define SEQ_NUM_STEPS 16
 
+/* Step effects -- M2.5.
+ *
+ * V5's own numbering, which is a bare 0..7 in a uint8_t whose names live in a UI string
+ * table (main sketch:1128) and whose meanings live in an if-chain three hundred lines away
+ * (main sketch:2925-2940). Reproduced here as one enum so the number and the name cannot
+ * drift apart: the failure mode is a preset that says 4 meaning Dom7 in one file and
+ * MajStep in another, which is a silent transposition rather than a compile error.
+ *
+ * The 8 comes from V5, not from a count of what is implemented -- V5's FX_PAD_MAP is
+ * {0,1,2,3,4,5,6,7}, an identity map, so a ninth pad cannot assign one.
+ */
+enum {
+  SEQ_FX_NONE     = 0,
+  SEQ_FX_OCTUP    = 1,
+  SEQ_FX_RETRIG   = 2,
+  SEQ_FX_STUTTER  = 3,
+  SEQ_FX_MAJSTEP  = 4,
+  SEQ_FX_MINSTEP  = 5,
+  SEQ_FX_DOM7STEP = 6,
+  SEQ_FX_DIMSTEP  = 7,
+  SEQ_NUM_FX      = 8
+};
+
 /* One step of the pattern.
  *
  * `note` is V5's index, not a MIDI note, and the difference is 12 semitones -- see
  * seq_noteToMidi() for why the indirection exists at all rather than storing MIDI notes
  * in the presets.
  *
- * `effect` is carried but not yet acted on. See the note at the top of this file.
+ * `effect` is one of SEQ_FX_*, acted on as of M2.5. Every value in the eight shipped
+ * presets is SEQ_FX_NONE -- see the long note at the bottom of this file.
  */
 struct SeqStep {
   uint8_t note;
@@ -124,6 +147,52 @@ struct Sequencer {
   uint32_t catchups;
   uint32_t driftMaxUs;
   int32_t  driftLastUs;   // signed, for the report line
+
+  /* M2.5 -- the sub-step schedule, for Retrig and Stutter. These two effects are about WHEN
+   * rather than WHAT, so they cannot be turned into a note-on at the moment the step fires:
+   * they have to be remembered and fired later inside the same step.
+   *
+   * `subCount` is how many extra hits this step owes and `subIdx` which one is next.
+   * `subStepUs` is the nominal time of the step that armed the schedule, and each hit's
+   * nominal time is recomputed from it rather than accumulated from the previous hit -- so
+   * a stutter's second hit sits at exactly twice the offset of its first with no rounding
+   * carried forward. That is the main clock's "absolute nominal time" discipline applied
+   * one level down, and for the same reason.
+   *
+   * `subNote` and `subStep` are copies rather than reads of seq.steps[] / seq.cur at fire
+   * time. A preset load or a pad gesture between the step and its sub-hits would otherwise
+   * redirect a pending hit at a note the pattern no longer has, and the symptom would be a
+   * stray note in an unrelated key rather than anything that looks like a race.
+   */
+  uint8_t  subCount;
+  uint8_t  subIdx;
+  uint8_t  subFx;
+  uint8_t  subNote;
+  uint8_t  subStep;
+  bool     subAccent;
+  uint32_t subStepUs;
+
+  /* Sub-step instrumentation, on the same argument as driftMaxUs above: M2.5's acceptance
+   * criterion is "the eight effects behave as V5's do", and two of V5's eight are timed
+   * behaviours, so the only honest way to check those two is to time them.
+   *
+   * `subHits` is how many extra hits have actually fired, and it is the number that says
+   * whether the scheduler runs AT ALL. The failure mode of not calling the sub-step poll is
+   * a flawless drift report, an unchanging gate depth, and complete silence where the
+   * stutter should be -- three healthy-looking readings and one missing feature.
+   *
+   * `subMaxErrUs` is the worst lateness of a hit against its own nominal time, the
+   * sub-step analogue of driftMaxUs. Bounded, not growing.
+   *
+   * `subDropped` counts hits abandoned because the step moved on first. Expected to stay 0
+   * forever: the largest sub-step offset is 42/64, so a pending hit is always due before the
+   * next boundary unless the loop was blocked for a whole interval. It is counted rather
+   * than asserted, because a number that is asserted to be zero and a number that is
+   * printed to be zero are different claims.
+   */
+  uint32_t subHits;
+  uint32_t subMaxErrUs;
+  uint32_t subDropped;
 };
 
 /* Step orders. V5 calls these FWD / CW / ALT / REV / SKIP2 / SKIP3 / PING / RND, which
@@ -221,3 +290,75 @@ uint32_t seq_stepsPlayed();
  * about everything since boot.
  */
 void seq_driftReset();
+
+/* Set / read one step's effect -- M2.5.
+ *
+ * This is the whole of M2.5's claim to "the effects are available". V5 only ever writes the
+ * effect byte from doFXAssign(), which lives in the FUNC+FX pad sub-mode -- M3's territory,
+ * arriving with the pads that can reach it. Without an entry point here the feature would be
+ * unreachable from firmware at all, and unreachable code is exactly the kind that looks
+ * correct and is never once run.
+ *
+ * Both arguments are clamped rather than rejected, for the same reason seq_loadPreset()
+ * clamps: these are going to be called from a pad handler, and a pad handler is not a place
+ * where an out-of-range index should be able to walk off a table.
+ */
+void    seq_setStepEffect(uint8_t step, uint8_t fx);
+uint8_t seq_stepEffect(uint8_t step);
+
+/* Effect name, for a UI label or a diagnostic print. Never NULL; "?" for fx >= SEQ_NUM_FX.
+ * V5 keeps the same eight strings in a UI table (main sketch:1128) and this is that table.
+ */
+const char *seq_fxName(uint8_t fx);
+
+/* Sub-step diagnostics, M2.5. Zero until an effect with sub-hits actually fires -- which,
+ * for the eight shipped presets, is never. See the long note below. */
+uint32_t seq_subHits();
+uint32_t seq_subMaxErrUs();
+uint32_t seq_subDropped();
+
+/*
+ * =====================================================================
+ * A CORRECTION, and two facts about V5's shipped content that change what M2.5 can claim
+ *
+ * This file used to say: "Step effects ... The effect byte is carried in SeqStep and the
+ * presets already populate it, so M2.5 is a switch statement rather than a data migration."
+ *
+ * The first clause is true. The second is false, and it was false about V5 as well as about
+ * this port. Checked field by field against V5 rather than by eye: all eight of V5's factory
+ * PRESETS have an all-zero effect column, and so do all eight of ours -- byte for byte on
+ * all four columns, so the port is not at fault and never was.
+ *
+ * The error was in a comment, not in code, and it was still worth correcting, because the
+ * comment is what set the expectation that implementing the switch would be enough. It is
+ * not. Three things had to happen, and only one of them is the switch:
+ *
+ *   1. the effect switch itself;
+ *   2. seq_setStepEffect(), because V5 only ever writes this byte from doFXAssign() in the
+ *      FUNC+FX pad sub-mode, which arrives with M3. With no entry point, nothing in the
+ *      effect path can ever run, so it could not be verified by listening or by log;
+ *   3. instrumentation on the two timed effects, because "the effects behave as V5's do" is
+ *      not checkable for those two without measuring when they fired.
+ *
+ * Two facts about V5's content, which are the reason the scope stopped here rather than
+ * growing:
+ *
+ *   - V5 has a SECOND pattern set this port does not have: WALK_PATTERNS[8], "ACID WALKS",
+ *     an easter egg reached by holding pads 11-14 together (main sketch:857). Seven of its
+ *     eight patterns use effects, and between them they use 1, 2, 3, 4 and 5. So real V5
+ *     content that exercises step effects exists, and M2 did not port it. Porting it is
+ *     content work belonging with the gesture that makes it reachable, which is M3.
+ *
+ *   - Effects 6 (Dom7Step) and 7 (DimStep) appear NOWHERE in V5's content -- not in the
+ *     factory presets, not in the walks. They exist only as values a pad can be assigned.
+ *     Which means "all eight effects work" cannot be demonstrated by playing V5's patterns
+ *     in EITHER direction, and no amount of porting V5's patterns will change that. It has
+ *     to be demonstrated on the mechanism.
+ *
+ * So M2.5's claim is deliberately about the mechanism: all eight effects resolve to V5's
+ * pitches and, for the two timed ones, fire at V5's offsets. The verification for that is in
+ * tools/test-sequencer.py and in the boot-time dump in seq_start(); the verification that it
+ * runs on hardware at all is the sub-step counters in the periodic report, which is why they
+ * are in the report rather than behind an accessor nobody calls.
+ * =====================================================================
+ */

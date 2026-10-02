@@ -40,6 +40,20 @@
 //#define JUKEBOX
 //#define JUKEBOX_PLAY_ON_START
 
+/* STEP-EFFECT ACCEPTANCE BUILD.
+ *
+ * Set to 1 for ONE flashed build whose only job is to prove the M2.5 sub-step scheduler
+ * actually runs on hardware; capture the serial log; then set it back to 0 before the
+ * shipping build. Nothing else changes between the two, so the diff is one token.
+ *
+ * The reason this build exists at all is in the long comment on SEQ_FX_SELFTEST further down.
+ * Short version: every shipped preset step is SEQ_FX_NONE, so in a normal build the sub-step
+ * code is never reached, and leaving it out entirely would leave every existing diagnostic
+ * reading exactly as healthy as it is now. Three or four readings would look perfect with the
+ * whole feature missing.
+ */
+#define SEQ_FX_SELFTEST 1
+
 #define SEQUENCER               // the 16-step sequencer: M2, supersedes JUKEBOX
 #define SEQUENCER_PLAY_ON_START // start playing at boot. There is no pad UI until M3, so
                                // this is the only way to hear it, and a sequencer nobody can
@@ -189,6 +203,53 @@ const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
     I2S.write((uint8_t*)out_buf[current_out_buf]._signed, \
               sizeof(out_buf[current_out_buf]._signed)); }
 #endif
+
+/* SEQ_FX_SELFTEST: does the M2.5 step-effect machinery run, on this hardware, in this build?
+ *
+ * WHY A SEPARATE BUILD EXISTS AT ALL, since this is the same shape as M0_DIAG and
+ * BENCH_AUDIO_HEADROOM above and the reason is worth stating once rather than three times.
+ *
+ * All eight of the ported presets use SEQ_FX_NONE on every step -- verified field by field
+ * against V5, which has the same all-zero effect column. So in a normal build the sub-step
+ * scheduler is never reached, and the acceptance criterion "the eight effects behave as V5's
+ * do" cannot be checked by listening or by log at all. Not "hard to check": there is no
+ * reachable path to it.
+ *
+ * That leaves three things worth verifying, and only one of them is arithmetic:
+ *
+ *   1. The resolution arithmetic -- which pitch each effect produces, and which sub-offsets
+ *      each timed effect fires at. Pure arithmetic, checked offline in
+ *      tools/test-sequencer.py and printed on the device at seq_start() by seq_fxDump(). Both
+ *      are always on; no build flag involved.
+ *
+ *   2. That the scheduler is actually WIRED IN. The failure mode is not subtle in principle
+ *      and completely invisible in practice: forget the seq_subPoll() call in seq_poll() and
+ *      the drift report stays flawless, the gate depth stays at 1, the queue never overflows,
+ *      and there is simply no retrigger. Nothing in the log says a hit went missing, because
+ *      the thing that would have said it is the thing that did not run.
+ *
+ *   3. That a sub-hit DRAINS before its note-on. synthvoice.ino decides legato from held-note
+ *      depth (synthvoice.ino:225), so a sub-hit that posted a bare note-on would leave depth at
+ *      2, arm CC 65, and stop retriggering the envelope -- the exact degradation recorded in
+ *      HANDOFF 6.4.2, reached from the opposite direction. It is observable only as
+ *      `held a/s 2/0` on a report line, and only while a sub-hit is actually firing.
+ *
+ * Items 2 and 3 are the two this project has already been bitten by once each, in the two
+ * ways it has already been bitten: the f464c01 compile failure, where every offline check was
+ * modelling ALGORITHM while the shipped file could not build, and the mean-report overflow,
+ * where a plausible constant read as a stable clock. Five green checks prove the thing you
+ * checked, not the thing that ships. So items 2 and 3 get a build that actually runs the
+ * code, read off the wire, and the switch goes back to 0.
+ *
+ * NOT DEFINED HERE ON PURPOSE. It is defined near the top of this file, at the acceptance
+ * block, so that the switch being ON is the first thing anyone reading config.h sees and not
+ * the fortieth. Two definitions of the same macro is not a warning in C, it is a silent
+ * redefinition that takes whichever the preprocessor saw last -- which is a claim with no
+ * diagnostic attached, in a file whose entire purpose is to make claims checkable.
+ *
+ * tools/test-sequencer.py asserts there is exactly one definition, and that it is 0 for a
+ * shipping build.
+ */
 
 /* BENCH_AUDIO_HEADROOM: how much of each buffer period does the audio actually cost? */
 #define BENCH_AUDIO_HEADROOM 0  // Measured, four times, then switched off.
