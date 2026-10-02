@@ -352,6 +352,10 @@ M0 其实早就写好了这个区分，但只放在 `#if M0_DIAG` 里，
 （`oobSample` / `oobCache`），`[WARN]` 分成两条，cache 那条带 `***` 前缀。
 代价是每个活跃声部每 buffer 多一次比较，对着 594 µs 的生成器开销可以忽略。
 
+构建 `8ad19c7`（CI 36950574250），sketch 561,888 B（53%），全局 60,720 B。
+`merged.bin` sha256
+`439AA778A7E7416DCF245B2849FC45159C9E0BF86EC7737D26D53F8DEF22EFFC`
+
 ### 还差：`FlashSize` 和 M1 听感
 
 构建 `d484a1e`（CI 36948246652）加上了直接测量：
