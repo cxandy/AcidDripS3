@@ -21,6 +21,10 @@
 */
 #pragma GCC optimize ("O2")
 #include "config.h"
+// For esp_flash_get_size() in setup(). Arduino.h very likely drags this in already, but
+// "very likely" is not a dependency, and an undeclared function is the one kind of mistake
+// in this sketch that fails loudly at compile time rather than silently at 0 in an #if.
+#include <esp_flash.h>
 // M1: AcidBox.ino sorts BEFORE engine_iface.ino, so setup() and regular_checks() would not
 // see eng_init()/eng_poll() from the concatenation alone. Without this the calls fail to
 // compile -- but see AcidBanger.ino:4 for the same trap's quieter form, where an
@@ -367,6 +371,27 @@ void setup(void) {
   // HWCDCSerial and the log arrives on the USB-OTG port. Its markers printed on every
   // boot forever to answer a question nobody asks any more.
   DEBUG_PORT.println("[M0] log port: HWCDC (native USB) on USB-OTG");
+  // FlashSize, measured rather than declared. The build declares FlashSize=16M in the
+  // FQBN, which is a request to the image writer, not a reading of the part. Two earlier
+  // attempts to capture the bootloader's own "flash size:" line failed, and the reason is
+  // now known: that line is printed by the second-stage bootloader to its own log
+  // console, and the ROM preamble this board does emit on USB-OTG contains no size field
+  // at all (rst/SPIWP/mode/load/entry only). Asking for it a third time was not going to
+  // work.
+  //
+  // It also turned out not to matter: the partition table in merged.bin ends at exactly
+  // 0x400000, so the whole layout fits in 4 MiB and an 8 MB part behaves identically to a
+  // 16 MB one. This line exists so the declaration is at least visible as a fact, and so
+  // a future kit that outgrows 4 MiB fails loudly here rather than mysteriously later.
+  {
+    uint32_t fsz_ = 0;
+    if ( esp_flash_get_size(NULL, &fsz_) == ESP_OK ) {
+      DEBF("[M0] flash: %u bytes = %u.%01u MB (layout needs 4.00 MB, ends 0x400000)\r\n",
+           (unsigned)fsz_, (unsigned)(fsz_ / 1048576u), (unsigned)((fsz_ % 1048576u) / 104857u));
+    } else {
+      DEBF("[M0] flash: size query failed\r\n");
+    }
+  }
   DEBUG_PORT.flush();
 #endif
 delay(200);

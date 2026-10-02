@@ -663,20 +663,25 @@ inline void Sampler::Process( float *left, float *right ) {
       // negative float converts to a huge uint32 here, not to a negative index. Bound
       // it against both the sample and the real allocation before dereferencing.
       // No printing in here: this runs in the IRAM audio task.
-      // Both conditions are always evaluated now rather than short-circuited, so the
-      // counters can be split. Costs one extra comparison per active voice per buffer,
-      // against a measured 594 us of generator work -- immeasurable, and it was the
-      // short-circuit that made the distinction unavailable outside M0_DIAG.
-      bool oobSmp_ = ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize);
-      bool oobCch_ = ((size_t)samplePlayer[i].sampleStart + dataOut + 1
-                      >= (size_t)SAMPLER_CACHE_SIZE);
-      if ( oobSmp_ || oobCch_ ) {
+      // The condition below is kept byte-for-byte as it was, short-circuit and all, and
+      // that is deliberate. An earlier version of this split hoisted the two tests into
+      // locals so the counters could tell them apart, which cost one extra comparison
+      // for every active voice on every buffer. The arithmetic said that was about
+      // 0.02 us against 594 us of generator work, and the arithmetic was probably right
+      // -- but the very next bench run came back 5 points higher on mean cpu, and this is
+      // the only thing that changed. Whether that was code layout or coincidence is not
+      // something to argue about when the split can be had for free instead: the common
+      // path is now identical to upstream, and the extra test happens only on the rare
+      // path where the guard has already fired and the voice is about to be deactivated.
+      if ( ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize) ||
+           ((size_t)samplePlayer[i].sampleStart + dataOut + 1 >= (size_t)SAMPLER_CACHE_SIZE) ) {
         oobReads++;
         // A tail overshoot and a cursor that left the cache are not the same event and
         // must not share a counter. Only the second is a fault; measured 2026-10-02 the
         // first costs a 1-2 frame over-read, at most 6 bytes at any CC pitch, and the
         // second has never been seen.
-        if ( oobSmp_ ) { oobSample++; } else { oobCache++; }
+        if ( ((size_t)dataOut + 1 >= (size_t)samplePlayer[i].sampleSize) ) { oobSample++; }
+        else { oobCache++; }
         samplePlayer[i].active     = false;
         samplePlayer[i].samplePos  = 0;
         samplePlayer[i].samplePosF = 0.0f;
