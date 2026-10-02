@@ -14,7 +14,30 @@
 // layer (engine_iface) rather than pretending to be a MIDI cable. Kept in the tree, off,
 // because it is the fallback if the sequencer ever needs to be compared against something
 // that is known to work -- and "known to work" is a claim only the old thing can support.
-#define JUKEBOX
+//
+// JUKEBOX itself is off, not just JUKEBOX_PLAY_ON_START. The first M2 commit turned off
+// only the autostart and left the switch itself on, which was a lie told in two places:
+// this comment already said "off" and it was not, and jukebox_tick() was still being called
+// from regular_checks() every pass. midi_playing only ever gets set inside do_midi_start(),
+// which is the JUKEBOX_PLAY_ON_START-gated call, so nothing was playing -- the symptom was
+// absent, not the cause. What was still running was run_tick()'s 250 Hz button scan plus
+// run_ui(), on core 0, the same core the sequencer clock runs on, which is the core whose
+// timing the drift measurement is about. Dead load next to the thing being measured.
+//
+// Verified before flipping: all of AcidBanger.ino is inside #ifdef JUKEBOX, and every
+// symbol it defines (instruments[], buttons[], button_pins[], send_midi_noteon/off,
+// init_instruments, do_midi_stop, run_ui, do_midi_tick, current_drumkit) is referenced only
+// from inside that same #ifdef. The mentions outside it -- sampler.ino:387, engine_iface.ino
+// :196, midi_handler.ino:68, config.h:104, sequencer.ino:407 -- are all comments, and the one
+// real outside call site, midi_handler.ino:106 do_midi_stop(), carries its own #ifdef JUKEBOX.
+// Note that current_drumkit is not state the drums need: Sampler::NoteOff() is empty, the kit
+// is chosen per note as kit*12 + slot, and the sequencer posts drum notes through eng_noteOn
+// with the offset already applied.
+//
+// One side effect, in the good direction: init_midi() did pinMode(LED_BUILTIN, OUTPUT) and
+// config.h:327 defines LED_BUILTIN as 0, so the jukebox was putting GPIO 0 into output mode
+// during setup() on a pin that is the boot strap. That is now gone.
+//#define JUKEBOX
 //#define JUKEBOX_PLAY_ON_START
 
 #define SEQUENCER               // the 16-step sequencer: M2, supersedes JUKEBOX

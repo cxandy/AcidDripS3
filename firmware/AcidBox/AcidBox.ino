@@ -596,10 +596,14 @@ void regular_checks() {
   // rising loops= in the report proves loop() on core 1 is still running. Every other
   // number in this diagnostic assumes it is, and that was never checked. Three runs
   // produced no report line at all, and the question worth answering is whether this
-  // function is reached: jukebox_tick() -> run_tick() -> run_ui() all sit ahead of
-  // the reporting code, so a stall in any of them would be indistinguishable from
-  // silence on the wire. (Those three were audited and none of them blocks, but the
-  // counter settles it from the device rather than from reading the source.)
+  // function is reached.
+  //
+  // The suspects that used to sit ahead of the reporting code were jukebox_tick() ->
+  // run_tick() -> run_ui(), and they are gone as of the JUKEBOX switch being turned off
+  // for real rather than only JUKEBOX_PLAY_ON_START (config.h). MIDI.read() is the only
+  // thing left ahead of the report, and it does not block. The counter is kept anyway:
+  // it is four bytes of .bss and it settles reachability from the device instead of from
+  // reading the source, which is the part that was never actually verified before.
   static uint32_t m0Loops = 0;
   m0Loops++;
 #endif
@@ -631,7 +635,7 @@ void regular_checks() {
 #endif
 
   // M1: apply everything that was posted above -- MIDI events from MIDI.read(), and
-  // sequencer events from seq_poll() or jukebox_tick() -- in one pass, in arrival order.
+  // sequencer events from seq_poll() -- in one pass, in arrival order.
   //
   // Here rather than at the top of the function so that the drain happens in the SAME
   // loop() iteration the events were queued in. That is what keeps this from costing
