@@ -98,7 +98,7 @@ struct Sequencer {
 
   int8_t   key;        // semitones of transposition, signed
   int8_t   octave;     // octaves of transposition, signed
-  uint8_t  rrMode;     // step order, 0..7, see SEQ_ORD_* below
+  uint8_t  rrMode;     // step order, 0..7, see SEQ_ORDER_* below
   uint8_t  portaSpeed; // 1..8, indexes SEQ_PORTA_CC[]
 
   bool     rrPingFwd;  // direction latch for the bouncing orders

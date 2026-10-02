@@ -476,20 +476,28 @@ static void seq_advanceStep() {
   // proven here and a later reader must not go looking for a constraint that does not exist.
   // The pointer is kept because it matches the surrounding code, which is the only real
   // reason. `const SeqStep &s = ...` would compile and behave identically.
+  // It was this. The first commit of M2 failed to compile here with six errors, all of the
+  // form "request for member 'note' in 's', which is of pointer type" -- because switching
+  // & to * without switching the member accesses from s.x to s->x is only a two-character
+  // edit that does not survive contact with a compiler. What made it ship is that every
+  // offline check I ran in this file was checking ALGORITHM, not spelling: the cursor
+  // simulation, the gate-depth model and the clock model all reimplemented the logic
+  // rather than compiling it, so all three passed on a file that would not build. A test
+  // that cannot fail on the bug it is written next to is not a test of that bug.
   const SeqStep *s = &seq.steps[seq.cur];
 
   // Channel 2 first, then drums, then the bass. That order is V5's -- advanceStep() called
   // bmTriggerStep() before firing channel 1 -- so the bass lands on top of the kit rather
   // than under it, and the mix reads the way it did.
-  seq_triggerSecond(seq.cur, s.note);
+  seq_triggerSecond(seq.cur, s->note);
 
-  if (s.active) {
+  if (s->active) {
     // A non-slide step drains first, and that is load-bearing rather than tidy: see the
     // seqAcidHeld note. Skipping the drain leaves the stack deeper than 1 and every later
     // note-on becomes legato with no retrigger, which sounds like a tuning fault.
-    if (!s.glide || seqAcidHeldN == 0) { seqAcidReleaseAll(); }
+    if (!s->glide || seqAcidHeldN == 0) { seqAcidReleaseAll(); }
     seq_triggerDrums(seq.cur);
-    seq_triggerNote(s.note, s.accent, s.glide);
+    seq_triggerNote(s->note, s->accent, s->glide);
   } else {
     // A rest still has to release. Skipping this holds the previous note for the length of
     // the whole loop, which on a 16-step pattern is two seconds of one note sounding
