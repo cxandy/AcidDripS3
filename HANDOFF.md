@@ -19,9 +19,13 @@
 
 **M2 十分钟验收已通过。** 构建 `1918be1`，CI **36967271850** 通过。
 sketch **554,376 B**（52%），globals **59,232 B**（18%）。
-用户插上 COM8，日志直接抓：**21 个窗口 / 5040 步 / 10 分半**，
+日志直接从 COM8 抓：**21 个窗口 / 5040 步 / 10 分半**，
 `(±N us)` **每个窗口都是 0**，`catch` **每个窗口都是 0**，
 `held a` 每个窗口都是 1（从不钉在 8）。详见 §6.4.11。
+
+**`1918be1` 已经自己刷上板了**（esptool 5.3.1 走 COM8，实测可行，命令见 §4.4），
+刷后 `mean 125000.00` 在硬件上确认修好、`RAMCACHE … 84 samples` 与刷机前逐位相同，
+见 §6.4.12。
 
 **过程中抓出并修掉一个真 bug**：报告里的 `mean` 字段因 16.16 定点**溢出 uint32**
 一直是错的（120 BPM 下打印 59464，真实是 125000），见 §6.4.10。
@@ -187,7 +191,74 @@ Web Serial）。**不要用 web.esphome.io**——它是 ESPHome 的设备向导
 
 只刷固件就上电的后果就是上面那条静默格式化。
 
-### 4.4 附带一条：怎么读 CI 日志
+**但只刷 `merged.bin` 本身是安全的**，这一点已经**实测**过，不是推断：
+
+`merged.bin` 是 4 MiB，结束于 `0x400000`，而 `littlefs` 在 **`0x110000`** ——
+**在镜像之外**。所以 `write-flash 0x0 merged.bin` 根本不会写到鼓组数据上，
+`write-flash` 默认也不做全片擦除。
+
+实测（刷 `1918be1` 前后各读一次 littlefs 前 256 KB）：
+
+| | sha256 |
+|---|---|
+| 刷前 | `ca6589a7ca62786aeeea3a44cf482ca005c54f390af2d9716f7ace47afdb7385` |
+| 刷后 | `eebcfb30eeb8e6f175ec876307a3e04eeaafb1cbd58f495f44b58e370d2fee21` |
+
+**498 / 262,144 字节不同（0.19%），但采样负载一个字节没动。**
+差异全部落在**前 8,147 字节内**（littlefs 元数据区），没有任何一处在 8 KB 之后，
+而采样数据在兆字节量级。变化模式是成对短段：
+
+```
+0x41: 2E 31 ->  86 3B
+0x4D: 2E 31 ->  86 3B
+0x6A: 2E 31 ->  86 3B   ...   共 174 段
+```
+
+`2E 31` 是 ASCII `".1"`，`86 3B` 是 littlefs **inode 时间戳**的低字节 ——
+新固件启动时写了元数据，时间戳前进了。littlefs 魔数 `6C 69 74 74 6C 65 66 73`
+（`"littlefs"`）在偏移 0 处刷前刷后一致。
+
+**功能验证**（这才是结论的依据，偏移量只是旁证）：刷机后开机日志
+`[M0] RAMCACHE: 2338738 of 3145728 bytes used (74%), 84 samples`
+与刷机前**逐字节相同**。鼓组完好。
+
+**记下来是因为**：以后刷完机如果去比 littlefs 的哈希，会看到它们不一样，
+容易误判成"鼓组被刷坏了"。**不一样是正常的**，判据要看 `84 samples`。
+
+### 4.4 命令行刷法：esptool 5.3.1 可以直接用（已实测）
+
+**这条以后可能有用：刷机不必等用户动手，COM8 上就能自己刷。**
+本机 `python -m esptool` 是 **v5.3.1**， pyserial 3.5。
+
+```powershell
+python -m esptool --chip esp32s3 --port COM8 --baud 460800 `
+    --before default-reset --after hard-reset write-flash 0x0 <merged.bin>
+```
+
+实测一次成功：`Wrote 4194304 bytes ... Verifying written data... Hash of data verified.`
+
+**esptool v5 的 CLI 和老版本不一样，两处会绊人：**
+
+- **没有 `connect` 子命令了**。命令是 `write-flash` / `read-flash` / `erase-flash` /
+  `flash-id` / `chip-id` / `read-mac` / `verify-flash` 这些。
+  想只探测连通性就用 `read-mac`。
+- `write-flash` 的参数是 **`<地址> <文件>`**（空格分隔，没有 `--address` 之类）。
+- `--before` 的可选值：`default-reset` / `usb-reset` / `no-reset` / `no-reset-no-sync`。
+  实测 `--before default-reset` 在 COM8 上直接就能把芯片切进下载模式。
+
+**ROM 自报的三项可以和别的证据互相对上**，刷机前值得顺手看一眼：
+`USB mode: USB-Serial/JTAG`、`MAC: 14:c1:9f:49:57:9c`（和 PnP 里
+`USB\VID_303A&PID_1001\14:C1:9F:49:57:9C` 一致）、`Embedded PSRAM 8MB (AP_3v3)`
+（和堆摘要 `At 0x3c080000 len 8388608` 一致）。
+
+**一个 PowerShell 的坑**：`Select-String ... | Select-Object -First N`
+在匹配够 N 条之后会**关闭管道**，给上游的原生进程发停止信号 ——
+所以 `python -m esptool read-flash ... 2>&1 | Select-String "bytes" | Select-Object -First 3`
+会在传输中途**把 esptool 杀掉**，然后下一个命令去读一个根本没写完的文件，
+报"文件不存在"。看着像 esptool 失败，其实是管道自己动的手。
+**读大块 flash 一定要 `> logfile 2>&1` 落盘再过滤。**
+
+### 4.5 附带一条：怎么读 CI 日志
 
 GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路径是：
 **commit 页面 → checks 状态徽章 → Details**。拿到 run 页面后
@@ -251,9 +322,13 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
    已知缺陷、以及那些只有跑起来才会暴露的问题，记在 §6.4。
 7. ~~刷上去量那三个数~~ —— **量完了**，§6.4.11。过程中抓出并修掉了报告里的
    `mean` 溢出 bug（§6.4.10）。`JUKEBOX` 只关了一半的缺陷记录在 §6.4.9。
-8. **现在做：刷 `1918be1`** 复核修复后的 `mean`（应该读 125000 附近），
-   然后是**听感**（MIDI 键盘弹几个音），以及**滑音那半条**（跑 P1 预设，
-   §6.4.11 说明了为什么 30 秒快照抓不到它）。
+8. ~~刷 `1918be1` 复核 `mean`~~ —— **已经刷完并且验完**（§6.4.12）。
+   `mean 125000.00`、`held a/s 1/0 (drums n/a)`、`RAMCACHE … 84 samples` 全部对上。
+   **刷机以后我自己能做**，不用再等你动手：esptool 5.3.1 走 COM8，命令见 §4.4。
+9. **还欠的只有感官判断**（数字上 M1 + M2 已经全部拿到）：
+   - 接 MIDI 键盘弹几个音（M1 的听感验收，拖了五轮）
+   - 跑 P1 预设验滑音那半条（§6.4.11 说明了为什么 30 秒快照抓不到它）
+   - 两件都需要耳朵，代码量不出来
 
 设计文档里有完整的里程碑和依赖顺序，关键路径 M0 → M1 → M2 → M2.5 → M3 → M4。
 M0 / M1 / M2 代码都已完成，M2 已上板但**验收数字一个都还没量**。
@@ -942,7 +1017,9 @@ M2 的验收标准是"跑十分钟，没有音高漂移，没有累积抖动"。
 ### 6.4.8 上板验收步骤（**已跑完，结果在 §6.4.11**）
 
 > 保留是因为 M3 还要用同一套步骤再跑一次。
-> 刷 `1918be1` 的产物，`merged.bin` @ `0x0`（§4.1）。**别用 web.esphome.io。**
+> 刷 `1918be1` 的产物，`merged.bin` @ `0x0`（浏览器烧法见 §4.2，
+> **命令行 esptool 烧法见 §4.4，已实测可行**）。**别用 web.esphome.io。**
+> 板子上现在已经是这一版了，**不用重刷**。
 
 1. 冷启动，USB-OTG 口看日志。**开串口本身就会复位 ESP32-S3 的原生 USB**
    （`rst:0x15 USB_UART_CHIP_RESET`），所以冷启动日志是白拿的，不用手动按复位。
@@ -1155,6 +1232,35 @@ sketch **554,376 B**（52%），globals **59,232 B**（18%）。
 （4,194,304 B），四个子块哈希本地重算全部对上。
 0 error、13 warning（还是那 13 条既有的）、**0 条 `-Wformat`**——
 后者是编译器替我确认了格式串和参数确实对齐（我手工数的是 13/13）。
+
+### 6.4.12 已刷上板，`mean` 在硬件上确认修好
+
+板子现在跑的就是 `1918be1`。刷机过程和 littlefs 的验证见 §4.3 / §4.4。
+
+刷后 80 秒日志（`[M2]` 两行是决定性的）：
+
+```
+[M0] RAMCACHE: 2338738 of 3145728 bytes used (74%), 84 samples
+[M2] 30 s window: 240 steps, mean 125000.00 us vs nominal 125000 us (+0 us),
+ max|err| 7 us, last +0 us, catch 0, total 240, held a/s 1/0 (drums n/a), prev print 0 us
+[M2] 30 s window: 240 steps, mean 125000.00 us vs nominal 125000 us (+0 us),
+ max|err| 7 us, last +3 us, catch 0, total 480, held a/s 1/0 (drums n/a), prev print 318 us
+```
+
+三件事一次刷机全部确认：
+
+| | 刷机前（`15e0e6d`） | 刷机后（`1918be1`） |
+|---|---|---|
+| `mean` | `59464.00`（**错的**） | **`125000.00`，正好等于名义值** |
+| `held` 打印 | `a/s/d 1/0/0`（`d` 是硬编码 0） | **`a/s 1/0 (drums n/a)`** |
+| `RAMCACHE` | `2338738 … 84 samples` | `2338738 … 84 samples`（**逐位相同**） |
+
+**`mean 125000.00` 是量出来的，不是推算的** —— 16.16 定点改成整数除法加余数之后，
+两个窗口都精确等于名义值 125000。`(+0 us)`、`catch 0`、`max|err| 7 us` 也都还在。
+刷机没有改变任何时序行为，符合预期（改的是打印，不是音频）。
+
+**至此 M2 数字验收全部完成。** 仍然欠的只有两件感官的事：
+接 MIDI 键盘弹几个音（M1 验收，拖了五轮），以及滑音那半条（跑 P1 预设，见 §6.4.11）。
 
 ---
 
