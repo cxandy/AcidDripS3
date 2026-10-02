@@ -131,6 +131,17 @@ bool eng_poll() {
 
 uint32_t eng_drops() { return engDropped; }
 
+uint8_t eng_heldDepth(Ch ch) {
+  switch (ch) {
+    case Ch::Acid:   return Synth1.mvaStack.n;
+    case Ch::Second: return Synth2.mvaStack.n;
+    // Drums has no stack to read. Not a "not implemented" case: Sampler::NoteOff() does
+    // nothing and drum samples are one-shots, so a held-note count for Drums would be
+    // reporting a concept that does not exist rather than a number that happens to be zero.
+    default:         return 0;
+  }
+}
+
 bool chanToCh(uint8_t midiChan, Ch &out) {
   switch (midiChan) {
     case SYNTH1_MIDI_CHAN: out = Ch::Acid;   return true;

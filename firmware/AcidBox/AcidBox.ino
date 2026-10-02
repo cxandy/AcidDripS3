@@ -30,6 +30,11 @@
 // compile -- but see AcidBanger.ino:4 for the same trap's quieter form, where an
 // undeclared name inside #if evaluates to 0 instead of erroring. Do not rely on position.
 #include "engine_iface.h"
+// M2: same ordering trap as engine_iface.h one line up -- AcidBox.ino sorts first in the
+// concatenation, and sequencer.ino sorts near the end, so setup()/regular_checks() get
+// nothing from position. sequencer.h pulls in engine_iface.h itself, so this one include
+// covers both the sequencer and the event layer it posts through.
+#include "sequencer.h"
 #include "fx_delay.h"
 #ifndef NO_PSRAM
 #include "fx_reverb.h"
@@ -424,6 +429,17 @@ delay(200);
   init_midi(); // AcidBanger function
 #endif
 
+#ifdef SEQUENCER
+  // M2. After eng_init(), because seq_init() posts CC 76 (accent depth) and CC 5 (slide
+  // time) through the event layer -- posting before eng_init() would apply them straight
+  // through instead of queueing, which happens to work but only by accident.
+  //
+  // After the engines are Init()ed, and after the buffers are zeroed below, because the
+  // sequencer can start firing on the very first regular_checks() pass and a step landing
+  // into an un-zeroed buffer is a click nobody would enjoy chasing.
+  seq_init();
+#endif
+
   // silence while we haven't loaded anything reasonable
   for (int i = 0; i < DMA_BUF_LEN; i++) {
     drums_buf_l[current_gen_buf][i] = 0.0f ;
@@ -457,6 +473,18 @@ delay(200);
   xTaskNotifyGive(SynthTask1);
   //  xTaskNotifyGive(SynthTask2);
   processing = true;
+
+#ifdef SEQUENCER_PLAY_ON_START
+  // M2: here rather than next to seq_init(), because the first step posts a note-on and
+  // this is the point where every buffer has been zeroed and the audio task exists.
+  // Starting any earlier means a step lands in a buffer nobody has silenced yet, which is
+  // a click that gets blamed on the sequencer for the rest of time.
+  //
+  // SEQUENCER_PLAY_ON_START is separate from SEQUENCER on purpose: keeping the sequencer
+  // compiled in but stopped is how M3 hands control to the pads without the device going
+  // silent in the meantime.
+  seq_start();
+#endif
 
 #if ESP_ARDUINO_VERSION_MAJOR < 3 
   // timer interrupt
@@ -592,8 +620,18 @@ void regular_checks() {
   jukebox_tick();
 #endif
 
+#ifdef SEQUENCER
+  // M2: the sequencer's clock. Before eng_poll() below, and for the same reason MIDI.read()
+  // is -- a step that posts its events after the drain waits a whole loop() iteration to
+  // be heard. loop() spins at priority 1 with a taskYIELD() between passes and nothing in
+  // regular_checks() blocks, so the resolution here is sub-millisecond and is not the thing
+  // limiting the clock's accuracy. The audio tasks are priority 5 on their own cores, so
+  // this does not touch the audio path.
+  seq_poll();
+#endif
+
   // M1: apply everything that was posted above -- MIDI events from MIDI.read(), and
-  // sequencer events from jukebox_tick() -- in one pass, in arrival order.
+  // sequencer events from seq_poll() or jukebox_tick() -- in one pass, in arrival order.
   //
   // Here rather than at the top of the function so that the drain happens in the SAME
   // loop() iteration the events were queued in. That is what keeps this from costing

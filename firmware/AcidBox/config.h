@@ -5,8 +5,22 @@
 
 #define BOARD_HAS_UART_CHIP
 
-#define JUKEBOX                 // real-time endless auto-compose acid tunes
-#define JUKEBOX_PLAY_ON_START   // should it play on power on, or should it wait for "boot" button to be pressed
+// M2: the jukebox is OFF. It was "real-time endless auto-compose acid tunes" -- it picked
+// notes at random and posted them straight at handleNoteOn(). Nothing about that survived
+// contact with a real sequencer: it has no pattern, no step position, no accent and no
+// slide, so there was no such thing as a bar, and no way to ask for one twice the same way.
+//
+// Replaced by the 16-step sequencer in sequencer.h, which posts through the same event
+// layer (engine_iface) rather than pretending to be a MIDI cable. Kept in the tree, off,
+// because it is the fallback if the sequencer ever needs to be compared against something
+// that is known to work -- and "known to work" is a claim only the old thing can support.
+#define JUKEBOX
+//#define JUKEBOX_PLAY_ON_START
+
+#define SEQUENCER               // the 16-step sequencer: M2, supersedes JUKEBOX
+#define SEQUENCER_PLAY_ON_START // start playing at boot. There is no pad UI until M3, so
+                               // this is the only way to hear it, and a sequencer nobody can
+                               // hear is not testable.
 #define MIDI_RAMPS              // this is what makes automated Cutoff-Reso-FX turn
 //#define TEST_POTS               // experimental interactivity with potentiometers connected to POT_PINS[] defined below
 

@@ -167,6 +167,25 @@ bool eng_poll();
  */
 uint32_t eng_drops();
 
+/* How many notes this engine currently has held, i.e. the depth of its SynthVoice
+ * monophonic-with-legato stack. Read-only and diagnostic.
+ *
+ * This exists because of one specific fact about SynthVoice that is easy to miss and
+ * expensive to get wrong: on_midi_noteON computes `slide = (mvaStack.n > 1)`, so a stack
+ * deeper than 1 turns every subsequent note-on into a legato -- setFrequency, no envelope
+ * retrigger. Any caller that posts note-ons without posting note-offs therefore fills the
+ * stack once and then produces no attacks at all for the rest of the session.
+ *
+ * That failure is nearly unlistenable on its own terms: it sounds like a tuning fault, or
+ * like a filter that will not open, and it gets investigated as a sound-design question
+ * rather than as a gate question. The sequencer's own report prints this depth so the claim
+ * "the gate is draining correctly" is a number in the log rather than a judgement.
+ *
+ * Ch::Drums returns 0 always: Sampler has no note stack, because Sampler::NoteOff() is an
+ * empty function and drum samples are one-shots. There is genuinely nothing to hold.
+ */
+uint8_t eng_heldDepth(Ch ch);
+
 /* MIDI channel number -> Ch. Returns false for a channel this engine does not own,
  * which happens legitimately: MIDI here is in omni mode, so any channel can carry a
  * message and handleNoteOn's if/else-if chain just ignores the rest. Callers use the
