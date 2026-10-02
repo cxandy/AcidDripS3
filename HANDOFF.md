@@ -389,6 +389,10 @@ M0 其实早就写好了这个区分，但只放在 `#if M0_DIAG` 里，
 **注意 `overruns` 同步从 0.032% 涨到约 1.4%**，和 mean 一起动，
 所以不是偶发尖峰而是整体分布上移。
 
+构建 `58e8576`（CI 36955772492），sketch 562,048 B（53%），全局 60,720 B。
+`merged.bin` sha256
+`875A200C2B4BFACD58C2A6A53A118289C72A806EB6D8944ED3D60C0B139C52D2`
+
 ### ✅ `FlashSize` 结案（不用再刷机了）
 
 三次都没抓到的原因找到了：**bootloader 那行 `flash size:` 是二级 bootloader
