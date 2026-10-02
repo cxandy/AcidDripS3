@@ -758,7 +758,8 @@ void seq_poll() {
 //                     snap branch in seq_poll() for why folding them in would flatter the
 //                     number. "No drift because it kept snapping" has to be
 //                     distinguishable from "no drift", and this is what distinguishes them.
-//   held a/s/d        SynthVoice's note-stack depth per channel. Depth above 1 on channel 1
+//   held a/s          SynthVoice's note-stack depth on the acid and second channels. Drums
+//                     are not in this field: see eng_heldDepth(). Depth above 1 on channel 1
 //                     means the gate is NOT draining and every note-on is legato with no
 //                     envelope retrigger -- which sounds like a tuning fault and not like a
 //                     bug. This turns "does it sound right" into something checkable for
@@ -843,8 +844,14 @@ static void seq_report() {
                       - (int32_t)((uint32_t)stepsInWin * (uint32_t)seq.interval);
 
   uint32_t t0 = micros();
+  // "held a/s/d": a and s are Synth1.mvaStack.n and Synth2.mvaStack.n, which are
+  // measurements. The d slot prints a dash, deliberately, because eng_heldDepth(Ch::Drums)
+  // is a hardcoded 0 -- Sampler::NoteOff() is empty and drum samples are one-shots, so a
+  // held-note count for drums would be a concept that does not exist. It used to print that
+  // 0 as if it were the third reading, next to two real numbers, which is exactly the shape
+  // of thing a reader will quote as evidence. A slot that cannot be measured gets a dash.
   DEBF("[M2] %lu s window: %lu steps, mean %lu.%02lu us vs nominal %lu us (%+ld us), "
-       "max|err| %lu us, last %+ld us, catch %lu, total %lu, held a/s/d %u/%u/%u, "
+       "max|err| %lu us, last %+ld us, catch %lu, total %lu, held a/s %u/%u (drums n/a), "
        "prev print %lu us\r\n",
        (unsigned long)(elapsedMs / 1000), (unsigned long)stepsInWin,
        (unsigned long)meanInt, (unsigned long)meanFrac,
@@ -853,7 +860,6 @@ static void seq_report() {
        (unsigned long)catchesInWin, (unsigned long)seq.stepsPlayed,
        (unsigned)eng_heldDepth(Ch::Acid),
        (unsigned)eng_heldDepth(Ch::Second),
-       (unsigned)eng_heldDepth(Ch::Drums),
        (unsigned long)prevPrintUs);
   seqRepPrintUs = micros() - t0;
 
