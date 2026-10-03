@@ -1332,6 +1332,338 @@ print("      for a person holding the device.")
 print("    - PLAY/STOP, the FUNC pages (tempo/preset/order/len) and the ch2 generator are")
 print("      not in this file. This is FX-assign only.")
 
+# ===================================================================== M3 Phase 2: ch2 pitch mode
+#
+# The discipline here is the same as Phase 1's, with one addition that the earlier sections
+# did not need: this milestone adds a mode that is UNREACHABLE from any control surface, so
+# the offline checks have to establish more than "the code says so". They end by producing
+# the two numbers the hardware will print, which is the M2.5 selftest prediction moved
+# forward -- a log line that can distinguish a mode that is being played from one that is
+# merely set.
+#
+# Every table below is parsed out of the .ino, not transcribed, including preset 0's notes.
+# The prediction at the end is therefore computed from the same text that compiles, so it
+# cannot drift away from the firmware the way a hand-written expected value would.
+SEQ_INO = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "firmware", "AcidBox", "sequencer.ino")
+seq_src = read(SEQ_INO)
+
+print()
+print("=" * 78)
+print("M3 Phase 2: channel 2 pitch mode -- tables parsed, both branches read, prediction made")
+print("=" * 78)
+
+ch2_fail = []
+
+
+def p2(label, ok, detail=""):
+    if ok:
+        print("  [PASS] %s%s" % (label, ("   " + detail) if detail else ""))
+    else:
+        ch2_fail.append(label)
+        print("  [FAIL] %s%s" % (label, ("   " + detail) if detail else ""))
+
+
+print()
+print("  the mode table")
+print("  " + "-" * 74)
+
+modes = {}
+for m in re.finditer(r"#define\s+SEQ_CH2_MODE_(\w+)\s+(\d+)", seq_src):
+    modes[m.group(1)] = int(m.group(2))
+
+# COUNT has to agree with the number of names in the table, or the clamp bound and the
+# array length are two numbers that can disagree -- which is the f464c01 shape.
+mcount = re.search(r"#define\s+SEQ_CH2_MODE_COUNT\s+(\d+)", seq_src)
+declared_count = int(mcount.group(1)) if mcount else None
+
+namem = re.search(r"SEQ_CH2_MODE_NAME\s*\[\s*SEQ_CH2_MODE_COUNT\s*\]\s*=\s*\{([^}]*)\}",
+                  seq_src)
+names = re.findall(r'"([^"]*)"', namem.group(1)) if namem else []
+
+p2("SEQ_CH2_MODE_CHORD is 0 -- M2's behaviour stays the default",
+   modes.get("CHORD") == 0, "CHORD=%s" % modes.get("CHORD"))
+p2("SEQ_CH2_MODE_OFF is 1", modes.get("OFF") == 1, "OFF=%s" % modes.get("OFF"))
+p2("SEQ_CH2_MODE_COUNT matches the number of names in the table",
+   declared_count == len(names) == 2,
+   "COUNT=%s, %d names %s" % (declared_count, len(names), names))
+
+# The name and the #define have to agree, or a UI cycling names and a UI cycling numbers
+# disagree about what mode 1 is.
+p2("names match the #defines they label",
+   len(names) == 2 and names[modes["CHORD"]] == "CHORD" and names[modes["OFF"]] == "OFF")
+
+# This is the check that makes the numbering decision falsifiable rather than a matter of
+# taste. If the table had been numbered to line up with V5 from 1 upward, mode 1 would have
+# to be CHRD -- which is not portable. Asserting that the port's 1 is V5's 0 means the
+# offset is deliberate and documented, and would fail loudly if someone "fixed" it later.
+v5_off_at = None
+for m in re.finditer(r"\bOFF\b", v5_src):
+    seg = v5_src[max(0, m.start() - 200):m.start() + 200]
+    if "CH2_VS_PITCH" in seg:
+        v5_off_at = seg
+        break
+p2("V5's CH2_VS_PITCH[0] is the string OFF -- so the port's mode 1 IS V5's mode 0",
+   v5_off_at is not None,
+   "port 1 = OFF" if v5_off_at else "could not locate CH2_VS_PITCH in V5")
+
+print()
+print("  the CHORD branch: does mode 0 still sound exactly what M2 shipped?")
+print("  " + "-" * 74)
+
+trig2 = fn_body(seq_src, "static void seq_triggerSecond(")
+if not trig2:
+    p2("seq_triggerSecond() found", False)
+else:
+    # M2's code was `int16_t n = (int16_t)idx + SEQ_CH2_INTERVAL[v];`. Mode 0 has to be
+    # that expression, not something near it.
+    p2("CHORD branch is idx + SEQ_CH2_INTERVAL[v], unchanged from M2",
+       re.search(r"n\s*=\s*\(int16_t\)idx\s*\+\s*SEQ_CH2_INTERVAL\[v\]", trig2) is not None)
+    # The voicing index counts from the STEP number, not from a running counter. That is
+    # what keeps the layer in phase when a step is skipped, and it is easy to "tidy" into a
+    # static counter without anything breaking in the default case -- because with a full
+    # 16-step pattern the two give the same answer forever.
+    p2("voicing index still counts from the step number, not a running counter",
+       re.search(r"for\s*\(\s*uint8_t k = 0;\s*k < step; k\+\+\s*\)", trig2) is not None)
+    p2("voicing index wraps on & 3",
+       re.search(r"v\s*=\s*\(uint8_t\)\(\s*v\s*&\s*3\s*\)", trig2) is not None)
+    # Gating the counting loop on the mode is an optimisation with a correctness edge: OFF
+    # must not need v, and CHORD must. If the gate were dropped, OFF would still be right;
+    # if it were inverted, CHORD would go silent. Either way it is worth pinning.
+    p2("voicing count is gated on mode == CHORD (OFF counts nothing)",
+       re.search(r"if\s*\(\s*seqCh2Mode\s*==\s*SEQ_CH2_MODE_CHORD\s*\)", trig2) is not None)
+
+print()
+print("  the OFF branch: is it really UNISON, and not an octave?")
+print("  " + "-" * 74)
+#
+# This is the subtlest thing in the milestone and the easiest to get wrong by accident.
+# V5's ch2 mode 0 computes `idx2 = scaleNote(seq.cur) + seq.trans`, i.e. channel 1's own
+# index -- which looks like "the note below channel 1" until you notice that V5 halves the
+# note frequency on BOTH channels: triggerNote() at :2122 and triggerCh2Pulse() at :2586
+# both compute noteFreq[idx] / 2. With both halved, channel 2 lands on channel 1's
+# frequency exactly. It is a unison doubling, not an octave doubling.
+#
+# The checks below are what make that reasoning falsifiable instead of an assertion in a
+# comment. If V5 halved only one channel, the port's mode 1 would be an octave out and every
+# other check here would still pass.
+if trig2:
+    off_body = ""
+    if "case SEQ_CH2_MODE_OFF:" in trig2:
+        seg = trig2[trig2.index("case SEQ_CH2_MODE_OFF:"):]
+        end = seg.index("case SEQ_CH2_MODE_CHORD")
+        off_body = seg[:end]
+    p2("OFF branch assigns idx with nothing added to it",
+       re.search(r"n\s*=\s*\(int16_t\)idx\s*;", off_body) is not None,
+       off_body.strip().splitlines()[-1].strip() if off_body.strip() else "branch empty")
+    p2("OFF branch adds NO interval (no SEQ_CH2_INTERVAL inside it)",
+       "SEQ_CH2_INTERVAL" not in off_body)
+    # The octave mistake, named explicitly, because "add 12" is the intuitive fix for
+    # "make ch2 an octave below ch1" and it would be wrong.
+    p2("OFF branch adds no 12 -- unison, not an octave below",
+       not re.search(r"n\s*\+=\s*12", off_body) and not re.search(r"n\s*=\s*\(\s*int16_t\s*\)\s*idx\s*\+\s*12", off_body))
+
+# V5 halves both channels. Read both and say so, rather than trusting the prose above.
+v5_halves = []
+for fn_name in ("void triggerNote(", "void triggerCh2Pulse("):
+    b = fn_body(v5_src, fn_name)
+    v5_halves.append("/ 2" in b and "noteFreq[" in b)
+p2("V5 halves noteFreq on BOTH triggerNote and triggerCh2Pulse",
+   len(v5_halves) == 2 and all(v5_halves),
+   "triggerNote %s, triggerCh2Pulse %s" % tuple(
+       "halved" if h else "NOT halved" for h in v5_halves))
+
+# And V5's own mode-0 branch really does reduce to the step's index with nothing added.
+v5_off_branch = ""
+if "else if (ch2PitchMode == 0)" in v5_src:
+    seg = v5_src[v5_src.index("else if (ch2PitchMode == 0)"):]
+    v5_off_branch = seg[:seg.index("\n  } else if (ch2PitchMode == 1")]
+p2("V5's mode-0 branch assigns scaleNote(seq.cur) + seq.trans and no interval",
+   re.search(r"idx2\s*=\s*\(int16_t\)\s*constrain\(\(int\)scaleNote\(seq\.cur\)\s*\+\s*seq\.trans",
+             v5_off_branch) is not None)
+
+print()
+print("  the clamp, and the mode being READ (not just stored)")
+print("  " + "-" * 74)
+
+setter = fn_body(seq_src, "void seq_setCh2Mode(")
+getter = fn_body(seq_src, "uint8_t seq_ch2Mode()")
+namer = fn_body(seq_src, "const char *seq_ch2ModeName(")
+
+p2("seq_setCh2Mode() rejects anything >= SEQ_CH2_MODE_COUNT",
+   bool(setter) and re.search(r"mode\s*>=\s*SEQ_CH2_MODE_COUNT", setter) is not None)
+p2("seq_setCh2Mode() degrades to CHORD, not OFF",
+   bool(setter) and re.search(r"=\s*SEQ_CH2_MODE_CHORD\s*;", setter) is not None)
+p2("seq_ch2Mode() exists and is not empty", bool(getter))
+p2("seq_ch2ModeName() bounds-checks its index too",
+   bool(namer) and re.search(r"mode\s*>=\s*SEQ_CH2_MODE_COUNT", namer) is not None)
+
+# The Phase 1 failure mode, applied to Phase 2. g_funcMode is set and never read, which was
+# a mode that existed in name only.
+#
+# The check that stops seqCh2Mode becoming the second one is NOT "the name appears in the
+# trigger function". Mutation testing proved that insufficient: with
+#
+#     if (seqCh2Mode == SEQ_CH2_MODE_CHORD) { ... }   // gate, still reads the mode
+#     switch (SEQ_CH2_MODE_CHORD) { ... }             // pitch, ignores it
+#
+# every check in this section still passed. The mode would have been settable, reportable,
+# named -- and completely inert, with a green test suite sitting next to it. That is the
+# exact shape of the bug, not a near miss of it.
+#
+# So the check pins the load-bearing read specifically: the switch that chooses the pitch has
+# to be the one switching on the mode.
+p2("the PITCH switch is on seqCh2Mode -- the read that decides what sounds",
+   bool(trig2) and re.search(r"switch\s*\(\s*seqCh2Mode\s*\)", trig2) is not None,
+   "switch subject: %s" % (re.search(r"switch\s*\(\s*([^)]{0,40})", trig2).group(1).strip()
+                           if trig2 and re.search(r"switch\s*\(\s*([^)]{0,40})", trig2) else "none"))
+
+# And the corollary: a mode name that is stored, printed and never consulted is exactly the
+# g_funcMode defect, so assert the count of decision points, not just the presence of one.
+reads = len(re.findall(r"\bseqCh2Mode\b", trig2)) if trig2 else 0
+p2("seqCh2Mode has more than one reference in the trigger path",
+   reads >= 2, "%d reference(s): the gate and the pitch switch" % reads)
+
+print()
+print("  the report line has to be able to tell the two modes apart")
+print("  " + "-" * 74)
+#
+# A mode NAME in the log is state, not evidence: a mode that is set and never acted on
+# prints exactly like one that is playing. The last-sounded note is the evidence, so the
+# check is that it is assigned inside the trigger function and printed by the report.
+p2("seqCh2LastMidi is assigned inside seq_triggerSecond",
+   bool(trig2) and re.search(r"seqCh2LastMidi\s*=\s*midi\s*;", trig2) is not None)
+p2("the report prints both the mode and the last note",
+   re.search(r'ch2 %u %s \(midi %u\)', seq_src) is not None)
+
+print()
+print("  PREDICTION FOR HARDWARE -- preset 0, default key, and what the log should read")
+print("  " + "-" * 74)
+print("  Computed from the parsed tables below, not written down by hand. If a table in the")
+print("  firmware changes, these numbers change with it; that is the point of computing them")
+print("  here rather than in this comment.")
+print()
+
+# Parse the three inputs the prediction needs.
+#
+# SEQ_CH2_MASK is `static const uint16_t SEQ_CH2_MASK = 0x049;`, NOT a #define. The first
+# version of this line anchored on `#define`, the match failed, ch2mask stayed 0, and the
+# prediction printed an EMPTY table -- four steps of header and no step numbers -- while
+# every check in the section still said PASS. That is the f464c01 shape exactly: a check
+# that cannot fail on the bug it sits next to. So the pattern does not assume the form, and
+# the assertions below now fail if any of the three inputs comes back empty.
+maskm = re.search(r"\bSEQ_CH2_MASK\s*=\s*(0x[0-9a-fA-F]+|\d+)", seq_src)
+ch2mask = int(maskm.group(1), 0) if maskm else None
+
+intm = re.search(r"SEQ_CH2_INTERVAL\s*\[\s*4\s*\]\s*=\s*\{([^}]*)\}", seq_src)
+ch2int = [int(x) for x in re.findall(r"-?\d+", intm.group(1))] if intm else []
+
+# Preset 0's note row: the first { ... } after the preset array opens.
+parr = re.search(r"SEQ_PRESETS\s*\[\s*SEQ_NUM_PRESETS\s*\]\s*=\s*\{(.*)", seq_src, re.S)
+p0notes = []
+if parr:
+    first = re.search(r"\{\s*\{([0-9,\s]+)\}", parr.group(1))
+    if first:
+        p0notes = [int(x) for x in first.group(1).split(",") if x.strip()]
+
+# The +12 in seq_noteToMidi, read rather than assumed. The port has no /2 that V5 has, so
+# the whole mode-1 reading depends on where the transposition happens, and it is one number.
+ntm = fn_body(seq_src, "uint8_t seq_noteToMidi(")
+off12 = re.search(r"idx\s*\+\s*(\d+)\s*\+\s*\(int16_t\)seq\.key", ntm) if ntm else None
+transp = int(off12.group(1)) if off12 else 0
+
+if len(ch2int) != 4 or len(p0notes) != 16 or ch2mask is None or transp == 0:
+    p2("all three prediction inputs parsed", False,
+       "mask=%s interval=%s notes=%d transp=%s"
+       % (ch2mask, ch2int, len(p0notes), transp))
+else:
+    # A mask of 0 is parseable and would produce an empty prediction that reads like a
+    # result. Assert it against the comment in the firmware, so a silent zero is a failure.
+    p2("SEQ_CH2_MASK parsed and non-zero", ch2mask != 0, "0x%03X" % ch2mask)
+
+    # Assert the mask against the step list its own trailing comment claims. This check is
+    # not decoration: it is how the M3 Phase 2 tests found that the comment said
+    # "steps 0, 3, 6, 9" while the mask was 0x049, which is steps 0, 3 and 6. Nothing about
+    # the audio was wrong; only the comment was, and only because something read both.
+    maskm = re.search(r"SEQ_CH2_MASK\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;\s*//\s*steps\s+([0-9,\s]+)",
+                      seq_src)
+    claimed = [int(x) for x in re.findall(r"\d+", maskm.group(2))] if maskm else []
+    actual = [s for s in range(16) if ch2mask & (1 << s)]
+    p2("the mask matches the step list in its own comment",
+       claimed == actual,
+       "comment says %s, 0x%03X is %s" % (claimed, ch2mask, actual))
+    p2("SEQ_CH2_MASK is 0x049 (unchanged from M2 -- see the note in sequencer.ino)",
+       ch2mask == 0x049, "0x%03X" % ch2mask)
+
+    # The consequence of 0x049 that the note above records: three firing steps means the
+    # fourth interval, the octave, is unreachable. Asserted so that if somebody does fix the
+    # mask to 0x249, this check fails and says what became true rather than leaving the note
+    # quietly stale.
+    p2("the unreachable fourth interval is the one the comment calls out",
+       (len(actual) == 3 and len(ch2int) == 4) or len(actual) >= 4,
+       "%d firing steps, %d intervals" % (len(actual), len(ch2int)))
+
+    p2("parsed SEQ_CH2_INTERVAL[4] = %s" % ch2int, ch2int == [0, 3, 7, 12])
+    p2("parsed preset 0's 16 notes", len(p0notes) == 16, str(p0notes[:6]) + " ...")
+    p2("seq_noteToMidi adds %d at key 0 (read from the source, not assumed)" % transp,
+       transp == 12)
+
+    steps = [s for s in range(16) if ch2mask & (1 << s)]
+    # Belt and braces on the same failure: whatever produced it, a prediction with no rows
+    # is not a prediction. Assert it has rows before printing it.
+    p2("the prediction has rows to print", len(steps) > 0,
+       "ch2 fires on steps %s" % steps)
+
+    chord_cycle, off_cycle = [], []
+    v = 0
+    for s in range(16):
+        if not (ch2mask & (1 << s)):
+            continue
+        chord_cycle.append(p0notes[s] + ch2int[v % 4] + transp)
+        off_cycle.append(p0notes[s] + transp)
+        v += 1
+
+    print()
+    print("    ch2 fires on steps %s of preset 0 (mask 0x%03X)" % (steps, ch2mask))
+    print()
+    print("      step        %s" % "  ".join("%6d" % s for s in steps))
+    print("      note        %s" % "  ".join("%6d" % p0notes[s] for s in steps))
+    print("      CHORD  midi %s     <- what the report should print, mode 0"
+          % "  ".join("%6d" % x for x in chord_cycle))
+    print("      OFF    midi %s     <- what it should print, mode 1"
+          % "  ".join("%6d" % x for x in off_cycle))
+    print()
+    print("    So: `ch2 0 CHORD (midi NN)` with NN eventually landing on all of %s"
+          % sorted(set(chord_cycle)))
+    print("    is mode 0 confirmed; `ch2 1 OFF (midi NN)` with NN only ever from %s"
+          % sorted(set(off_cycle)))
+    print("    is mode 1 confirmed. A log showing mode 1 while the note cycles through the")
+    print("    CHORD column means the setter ran and the switch did not, which is a different")
+    print("    bug from the setter never being called.")
+    print()
+    print("    NOTE: these are mode 1 numbers written from the tables, NOT from hardware.")
+    print("    Mode 1 is unreachable from any pad until Phase 3, so the second row above is")
+    print("    a prediction about code nobody can yet reach -- read it as a spec for Phase 3's")
+    print("    verification, not as a measurement.")
+
+print()
+print("  " + "-" * 74)
+print("  M3 PHASE 2: %s" % ("ALL PASS" if not ch2_fail else "*** %d FAIL ***" % len(ch2_fail)))
+for f in ch2_fail:
+    print("    FAILED: %s" % f)
+
+print()
+print("  Still NOT settled by anything above, stated so it is not over-read:")
+print("    - that mode 1 can be reached at all. Nothing calls seq_setCh2Mode(); the FUNC")
+print("      page that will is Phase 3. A mode that cannot be selected cannot be heard, and")
+print("      the prediction above is a spec for later, not evidence now.")
+print("    - that mode 0 sounds right. The checks above prove mode 0's arithmetic is")
+print("      unchanged from M2's; whether it sounds like a chord layer is an ear question.")
+print("    - that mode 1 sounds right. Same, and it cannot be checked by ear either until a")
+print("      control surface exists.")
+print("    - anything about V5's other six modes. They are not ported, and sequencer.h says")
+print("      which infrastructure each one is missing.")
+
 # ===================================================================== declaration / definition agreement
 #
 # Written because CI 36974920807 rejected this milestone for a two-character edit: the

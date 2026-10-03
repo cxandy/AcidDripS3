@@ -245,6 +245,63 @@ void seq_setOrder(uint8_t mode);
 void seq_setDrums(bool on);
 void seq_setSecond(bool on);
 
+/* Channel 2's pitch mode -- M3 Phase 2.
+ *
+ * WHY THIS IS NOT V5'S NUMBERING, stated at the declaration rather than discovered later.
+ *
+ * V5 has eight pitch modes for the pulse layer, CH2_VS_PITCH at :1680:
+ *
+ *     {"OFF","INV","RNDH","CHRD","FOLW","PDL","ECH1","WALK"}
+ *
+ * and ch2PitchMode is a bare 0..7 index into it (:1691). Only the FIRST of those is
+ * reachable in this port today, and the port's pre-existing behaviour is not any of them.
+ *
+ * What M2 shipped is a fixed layer: a sparse mask over a walking interval -- steps 0/3/6 out
+ * of 0x049, over {0,3,7}. The interval table holds four entries and the fourth is
+ * unreachable, because the mask only ever fires three steps; that is a long-standing M2
+ * discrepancy and the note on SEQ_CH2_MASK in sequencer.ino records it.
+ * V5's mode 0 (OFF) is something else entirely -- it plays the same pitch
+ * channel 1 is playing on that step, with none of the interval logic on top. So there was
+ * no V5 mode to preserve here; there was a constant, and a choice about what to call it.
+ *
+ * Hence:
+ *
+ *   mode 0  CHORD      the fixed walk M2 shipped. The default, so that M2 and
+ *                      M2.5's hardware baselines -- both measured with this sounding --
+ *                      continue to mean what they meant. Not V5's mode 0.
+ *   mode 1  OFF        V5's mode 0, ported: the step's own pitch, doubled at the unison.
+ *   2..7               not ported yet. See the note below on why each one is blocked.
+ *
+ * The numbering deliberately does NOT line up with V5's from 1 upward. A table that looks
+ * like V5's but is off by one everywhere else is worse than one that plainly is not: the
+ * first is a trap for anyone who knows V5, the second is announced by its own first entry.
+ *
+ * WHY 2..7 ARE NOT HERE. Each of V5's remaining modes needs at least one thing this port
+ * does not have, and inventing it would be writing a feature rather than porting one:
+ *
+ *   INV / RNDH / FOLW  need gLastCh1Note -- the note channel 1 last SOUNDED, held through
+ *                      channel 1's silent steps. This port has no equivalent, because
+ *                      channel 1's note-on is posted through eng_noteOn() and the engine
+ *                      keeps no history the sequencer can read back.
+ *   RNDH / WALK        need random(). V5's are random, so a bit-exact reproduction is not
+ *                      available even in principle -- only "same mechanism, different
+ *                      output", which is a claim that needs saying out loud when it is made.
+ *   CHRD / PDL / ECH1 / WALK  need seq.scale with SCALES[] / SCALE_LENS[], and therefore
+ *                      scaleNote() and seq.origNote[] -- none of which this port has. It
+ *                      has steps[].note, which already equals V5's scaleNote(cur) + trans
+ *                      with scale and transposition at their defaults, so mode 1 needs
+ *                      nothing new. The scale-aware modes need the whole scale machinery
+ *                      added first.
+ *
+ * Set / read it, and a name for a UI label. Clamped rather than rejected, for the same
+ * reason every other setter here is: these are going to be called from a pad handler, and
+ * a pad handler is not a place where an out-of-range index should be able to walk off a
+ * table.
+ */
+void     seq_setCh2Mode(uint8_t mode);
+uint8_t  seq_ch2Mode();
+const char *seq_ch2ModeName(uint8_t mode);
+
 /* Slide speed 1..8. This is V5's gPortaSpeed, and it is the replacement for V5's glide.
  *
  * See the long note on SEQ_PORTA_CC in sequencer.ino before changing the table: the

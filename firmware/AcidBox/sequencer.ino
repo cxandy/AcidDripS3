@@ -86,13 +86,51 @@ static const uint16_t SEQ_DRUM_PATTERN[12] = {
 // built from channel 1's current note so a transposition cannot leave the two clashing.
 // Both of those properties are kept; almost nothing else is.
 //
-// SEQ_CH2_MASK is much sparser than channel 1 on purpose. A chord stab every fourth step
-// under a sixteenth-note bassline is a texture; a chord on every sixteenth is a wall.
-// The intervals are a minor-ish voicing measured from the current step's own note, so it
-// follows transposition for free and needs no generator to stay consonant.
+// SEQ_CH2_MASK is much sparser than channel 1 on purpose. A chord stab every THIRD step under
+// a sixteenth-note bassline is a texture; a chord on every sixteenth is a wall. The intervals
+// are a minor-ish voicing measured from the current step's own note, so it follows
+// transposition for free and needs no generator to stay consonant.
 // =====================================================================
-static const uint16_t SEQ_CH2_MASK       = 0x049;    // steps 0, 3, 6, 9
+
+/* A DISCREPANCY IN M2, found by the M3 Phase 2 tests, and NOT fixed here.
+ *
+ * This mask has always been 0x049, which is steps 0, 3 and 6 -- three steps, every third step
+ * within the bar. The comment next to it claimed "steps 0, 3, 6, 9" and the prose above it
+ * claimed "every fourth step", and both were wrong: 0x049 & 0x200 is 0, so step 9 has never
+ * fired. Steps 0, 3, 6, 9 would be 0x249.
+ *
+ * A consequence worth stating rather than tidying away: with three firing steps, the voicing
+ * index only ever reaches 0, 1 and 2, so SEQ_CH2_INTERVAL's fourth entry -- the 12, the
+ * octave -- has never sounded. The four-note walk has been a three-note walk.
+ *
+ * WHY THE NUMBER IS LEFT ALONE. 0x049 is what M2 shipped and what both M2's and M2.5's
+ * hardware baselines were measured against; changing it changes audible output and invalidates
+ * every `held a/s`, `mean` and `fx` figure recorded in HANDOFF section 6. That is a decision
+ * about the sound, not a bug fix, and it is not this milestone's to make by accident. It needs
+ * a decision, then a re-measurement.
+ *
+ * The tests assert the mask against this comment, so the two cannot drift apart again in the
+ * direction where the code is right and the comment is not.
+ */
+static const uint16_t SEQ_CH2_MASK       = 0x049;    // steps 0, 3, 6  (NOT 9 -- see above)
 static const int8_t    SEQ_CH2_INTERVAL[4] = { 0, 3, 7, 12 };  // root, m3, 5, oct
+                                                                   // ^ the 12 is unreachable
+                                                                   //   at this mask; see above
+
+/* Channel 2's pitch modes -- M3 Phase 2. The long note is in sequencer.h at the
+ * declaration; the short version is that V5 numbers these 0..7 into CH2_VS_PITCH and
+ * only its first entry is reachable here, while the behaviour M2 actually shipped is
+ * none of V5's. So the port's table starts with the shipped behaviour and adds V5's
+ * first entry as mode 1, and says so in its own first name.
+ *
+ * SEQ_CH2_MODE_COUNT is 2, not 8, and it is the only number a UI needs: it is the bound
+ * for cycling through the modes. The absent six are not hidden slots that a pad press
+ * walks into and finds empty -- the clamp below rejects anything above it, so a UI that
+ * cycles 0..COUNT-1 never lands outside the table. */
+#define SEQ_CH2_MODE_CHORD 0
+#define SEQ_CH2_MODE_OFF   1
+#define SEQ_CH2_MODE_COUNT 2
+static const char *SEQ_CH2_MODE_NAME[SEQ_CH2_MODE_COUNT] = { "CHORD", "OFF" };
 
 // =====================================================================
 // SEQUENCER-OWNED PARAMETERS
@@ -191,6 +229,29 @@ static uint8_t seqAcidHeld[SEQ_HELD_MAX];
 static uint8_t seqAcidHeldN = 0;
 static uint8_t seqSecondHeld = 0;
 static bool    seqSecondHeldOn = false;
+
+/* Channel 2's pitch mode. Zero-initialised, and the zero IS the value: SEQ_CH2_MODE_CHORD
+ * is 0 on purpose, so leaving it alone means M2's behaviour rather than a new one. An
+ * explicit reset in seq_init() would say the same thing louder, and a reset that can
+ * disagree with the initialiser is one more place for the two to drift apart. */
+static uint8_t seqCh2Mode = SEQ_CH2_MODE_CHORD;
+
+/* The MIDI note channel 2 last sounded, for the report. 0xFF until it sounds once, which is
+ * distinguishable from a real note 0 in the log and is not a value the report has to
+ * special-case: it only matters before the first hit, and "no hit yet" is the honest thing
+ * to print there.
+ *
+ * This exists so the pitch mode is checkable from the log by somebody who is not listening.
+ * The mode name alone cannot do it: both modes print their name, and a mode that is set and
+ * then not acted on prints identically to one that is being played. The last note tells the
+ * two apart, because CHORD offsets channel 2 from channel 1's own note by a walking interval
+ * and OFF never does -- so with CHORD on, `ch2 midi` will eventually disagree with channel
+ * 1's note on the step it fired, and with OFF on it will never disagree.
+ *
+ * The intervals are written as {0,3,7} here rather than {0,3,7,12} on purpose. SEQ_CH2_MASK
+ * is 0x049, so only three steps fire and the voicing index never reaches 3; saying 12 here
+ * would be the same wrong claim as the old mask comment, repeated in a new place. */
+static uint8_t seqCh2LastMidi = 0xFF;
 
 /* Periodic-report window bookkeeping. Declared here rather than next to seq_report()
  * because seq_start() below has to reset it, and C++ will not let a function at line 600
@@ -442,12 +503,43 @@ static void seq_triggerSecond(uint8_t step, uint8_t idx) {
 
   // Which of the four voicings this step gets, counted from the step number rather than
   // from a running counter, so the layer stays in phase with the pattern instead of
-  // drifting against it if a step is ever skipped.
+  // drifting against it if a step is ever skipped. Only CHORD needs the voicing index;
+  // OFF plays the step's own pitch, so it counts nothing.
   uint8_t v = 0;
-  for (uint8_t k = 0; k < step; k++) { if (SEQ_CH2_MASK & ((uint16_t)1 << k)) v++; }
-  v = (uint8_t)(v & 3);
+  if (seqCh2Mode == SEQ_CH2_MODE_CHORD) {
+    for (uint8_t k = 0; k < step; k++) { if (SEQ_CH2_MASK & ((uint16_t)1 << k)) v++; }
+    v = (uint8_t)(v & 3);
+  }
 
-  int16_t n = (int16_t)idx + SEQ_CH2_INTERVAL[v];
+  int16_t n;
+  switch (seqCh2Mode) {
+    case SEQ_CH2_MODE_OFF: {
+      /* V5 :2509-2519, its mode 0: play the note that is actually THERE for this step, with
+       * none of the FOLLOW family's mirroring or interval logic on top.
+       *
+       * "Unison with channel 1" is worth being exact about, because the obvious reading is
+       * an octave doubling and that is not what V5 does. V5 scales BOTH channels the same
+       * way -- triggerNote() at :2122 and triggerCh2Pulse() at :2586 both compute
+       * noteFreq[idx] / 2 -- so with idx2 equal to channel 1's index, channel 2 lands on
+       * channel 1's frequency exactly, not an octave below it. The port has no /2 anywhere
+       * (see the note on seq_noteToMidi(), which is where V5's tuning error is discussed),
+       * so in MIDI numbers the faithful version of mode 0 is the step's own index with
+       * nothing added to it. Adding 12 here would be an octave doubling, which is a
+       * different instrument from the one V5 has.
+       */
+      n = (int16_t)idx;
+      break;
+    }
+    case SEQ_CH2_MODE_CHORD:
+    default: {
+      /* The fixed layer M2 shipped. A switch with a default rather than an if, so a third
+       * mode added later lands where the reader expects it and a corrupt mode value still
+       * sounds instead of going silent. */
+      n = (int16_t)idx + SEQ_CH2_INTERVAL[v];
+      break;
+    }
+  }
+
   if (n < 0)   { n = 0; }
   if (n > 127) { n = 127; }
 
@@ -460,6 +552,7 @@ static void seq_triggerSecond(uint8_t step, uint8_t idx) {
 
   seqSecondHeld   = midi;
   seqSecondHeldOn = true;
+  seqCh2LastMidi  = midi;   // for the report; see the declaration
 }
 
 // =====================================================================
@@ -885,6 +978,25 @@ void seq_setOrder(uint8_t mode) {
 void seq_setDrums(bool on)  { seq.drumsOn  = on; }
 void seq_setSecond(bool on) { seq.secondOn = on; }
 
+/* Channel 2's pitch mode. Clamped for the same reason seq_setOrder() clamps rather than
+ * rejects: these get called from a pad handler, and a clamp means a UI that offers 0..7
+ * while only 0..1 exist lands on mode 1 instead of walking off the name table.
+ *
+ * The clamp lands on CHORD rather than on OFF, and that is not arbitrary. CHORD is the
+ * shipped behaviour, so a bad index degrades to what the machine did before this setter
+ * existed rather than to something nobody has heard. */
+void seq_setCh2Mode(uint8_t mode) {
+  if (mode >= SEQ_CH2_MODE_COUNT) { mode = SEQ_CH2_MODE_CHORD; }
+  seqCh2Mode = mode;
+}
+
+uint8_t seq_ch2Mode() { return seqCh2Mode; }
+
+const char *seq_ch2ModeName(uint8_t mode) {
+  if (mode >= SEQ_CH2_MODE_COUNT) { return SEQ_CH2_MODE_NAME[0]; }
+  return SEQ_CH2_MODE_NAME[mode];
+}
+
 void seq_setPortaSpeed(uint8_t speed) {
   if (speed < 1) { speed = 1; }
   if (speed > 8) { speed = 8; }
@@ -1057,6 +1169,15 @@ void seq_start() {
   DEBF("[M2] seq start: %u steps, %u BPM (%lu us/step), slide %u -> %u ms\r\n",
        (unsigned)seq.len, (unsigned)seq.tempo, (unsigned long)seq.interval,
        (unsigned)seq.portaSpeed, (unsigned)SEQ_PORTA_CC[seq.portaSpeed - 1]);
+
+  // Channel 2's mode at the start of a run, with the fact spelled out: it is the mode the
+  // previous run left behind, and it is NOT reset by seq_start(). That is deliberate and is
+  // the same choice seq_loadPreset() makes about length and order -- a transport is not a
+  // reset button -- but it means "what did it play last time" is answered here rather than
+  // inferred from the next report line.
+  DEBF("[M3] channel 2 pitch mode: %u %s (%u of %u available -- V5 has 8, see sequencer.h)\r\n",
+       (unsigned)seqCh2Mode, seq_ch2ModeName(seqCh2Mode),
+       (unsigned)SEQ_CH2_MODE_COUNT, (unsigned)8);
 
   // The effect resolution table, once per start. It is 13 lines and it is the only place in
   // the whole firmware where the eight effects' actual behaviour is written down as data
@@ -1291,9 +1412,17 @@ static void seq_report() {
   // missing. With SEQ_FX_SELFTEST it is 45 per 30 s window at 120 BPM and checkable from the
   // log; without it, 0 is the correct and expected answer, and knowing which of those two
   // builds produced a given log is a question the line itself now answers.
+  //
+  // "ch2 N NAME (midi M)" is M3 Phase 2's, for the same reason and one step further: the
+  // NAME is state, not evidence, and a mode that is set and never acted on is
+  // indistinguishable in the log from one that is being played. The midi figure is the
+  // evidence. CHORD offsets channel 2 from channel 1's own note by a walking interval and
+  // OFF never does, so CHORD is confirmed by a line where ch2's note differs from channel
+  // 1's on the step it fired, and OFF is confirmed by a line where it never does. See the
+  // note on seqCh2LastMidi, and the note on SEQ_CH2_MASK for why the walk is {0,3,7}.
   DEBF("[M2] %lu s window: %lu steps, mean %lu.%02lu us vs nominal %lu us (%+ld us), "
        "max|err| %lu us, last %+ld us, catch %lu, total %lu, held a/s %u/%u (drums n/a), "
-       "prev print %lu us, fx %lu hits (max late %lu us, dropped %lu)\r\n",
+       "prev print %lu us, fx %lu hits (max late %lu us, dropped %lu), ch2 %u %s (midi %u)\r\n",
        (unsigned long)(elapsedMs / 1000), (unsigned long)stepsInWin,
        (unsigned long)meanInt, (unsigned long)meanFrac,
        (unsigned long)seq.interval, (long)windowErrUs,
@@ -1304,7 +1433,8 @@ static void seq_report() {
        (unsigned long)prevPrintUs,
        (unsigned long)seq.subHits,
        (unsigned long)seq.subMaxErrUs,
-       (unsigned long)seq.subDropped);
+       (unsigned long)seq.subDropped,
+       (unsigned)seqCh2Mode, seq_ch2ModeName(seqCh2Mode), (unsigned)seqCh2LastMidi);
   seqRepPrintUs = micros() - t0;
 
   // Per-window, so "max |err|" in the next line covers the next window rather than
