@@ -59,6 +59,20 @@ M3 按最坏窗口 84.7% 之后剩下的 **111 µs** 规划，原定 10%（72 µ
 **还欠的只有听感**（MIDI 键盘弹几个音），以及滑音那半条（跑 P1 预设）。
 数字上 M1 + M2 的验收已经全部拿到。
 
+**M2.5 步进效果已上板验收通过**（见 §6.5）。八个出厂 preset 每一步都是 `SEQ_FX_NONE`，
+所以 sub-step 代码在正常构建里**永远走不到** —— 这件事逼出了一个单独的验收构建
+（`SEQ_FX_SELFTEST 1`，CI 36975504788）。**跑之前先写下预测：45 次 / 30 s**。
+实测 `fx 45 / 90 / 135 / 180 / 225 hits`，`held a/s 1/0`，`subDropped 0`，
+`max late 8 us`，无任何故障信号。出货构建 `9456d22` 回到 `fx 0 hits`，与 M2 基线一致。
+**关键改动是 sub-hit 之前强制 drain** —— V5 根本没有 gate，本移植有，
+不 drain 的话 sub-hit 自己会变 legato（§6.4.2 那个回归类的反向到达），见 §6.5.3。
+
+**M3 Phase 1（Pads + FX assign）代码完成，上板未验**（`74b01b0`，CI 37083602986，
+0 errors）。M2.5 把八个效果做出来了却没有任何控制面能碰到它们，这是那条路径。
+`PAD_PINS` **不是 port**，V5 的引脚是 RP2040 的，照抄会接到 I2S 上 ——
+症状是噪音不是编译错误，所以换了一张表，**但没有原理图，16 个引脚每一个都是猜的**，
+见 §6.6.2。**pad 逻辑不依赖这个选择**，只有物理连接器依赖。
+
 ---
 
 ## 2. 新机器上怎么把环境恢复出来
@@ -325,13 +339,24 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 8. ~~刷 `1918be1` 复核 `mean`~~ —— **已经刷完并且验完**（§6.4.12）。
    `mean 125000.00`、`held a/s 1/0 (drums n/a)`、`RAMCACHE … 84 samples` 全部对上。
    **刷机以后我自己能做**，不用再等你动手：esptool 5.3.1 走 COM8，命令见 §4.4。
-9. **还欠的只有感官判断**（数字上 M1 + M2 已经全部拿到）：
-   - 接 MIDI 键盘弹几个音（M1 的听感验收，拖了五轮）
-   - 跑 P1 预设验滑音那半条（§6.4.11 说明了为什么 30 秒快照抓不到它）
-   - 两件都需要耳朵，代码量不出来
+9. ~~**M2.5**（步进效果）~~ —— **已实现、编过、上过板、验收通过**。`9456d22` 出货，
+   CI 36976291802。验收构建 `4c51f39` / CI 36975504788（`SEQ_FX_SELFTEST 1`），
+   `fx 45 hits` 对上预测。完整证据、设计理由、以及那个「V5 没有 gate 而本移植有」
+   的强制 drain，在 §6.5。
+10. **M3 Phase 1（Pads + FX assign）** —— **代码完成，上板未验**，`74b01b0`，
+    CI 37083602986，0 errors。详见 §6.6。**下一步应该先把它刷上去**：
+    刷完按 pad 7+8 进 FX assign，选一个效果，点一个 step，看串口那行
+    `[M3] step N effect X -> Y`。**但引脚表是猜的**（§6.6.2），
+    所以第一次刷机很可能一个 pad 都按不出来 —— 那是引脚表的问题，不是逻辑的问题，
+    两者的区别靠这段日志就能分开。
+11. **还欠的只有感官判断**（数字上 M1 + M2 + M2.5 已经全部拿到）：
+    - 接 MIDI 键盘弹几个音（M1 的听感验收，拖了五轮）
+    - 跑 P1 预设验滑音那半条（§6.4.11 说明了为什么 30 秒快照抓不到它）
+    - 两件都需要耳朵，代码量不出来
 
 设计文档里有完整的里程碑和依赖顺序，关键路径 M0 → M1 → M2 → M2.5 → M3 → M4。
-M0 / M1 / M2 代码都已完成，M2 已上板但**验收数字一个都还没量**。
+M0 / M1 / M2 / M2.5 已完成并验收；M3 做了 Phase 1（FX assign），
+Phase 2（ch2 generator）和 Phase 3（PLAY/STOP + FUNC 页面 + 交接）还没做。
 
 ---
 
@@ -1264,6 +1289,225 @@ sketch **554,376 B**（52%），globals **59,232 B**（18%）。
 
 ---
 
+## 6.5 M2.5：步进效果（**代码完成，上板验收通过**）
+
+八个 step effect 在 M2 里只是 `SeqStep` 里一个跟着走的字节，没有任何人去用它。
+M2.5 让它真的响，并且让 V5 的内容能原样搬过来。
+
+### 6.5.1 效果编号和两个 chord-step 音符表
+
+V5 的 `effect` 是一个裸的 `0..7`，名字在三 hundred 行之外的字符串表里，含义在另一个
+文件的三百行之外。这里把它收成一个 enum（`sequencer.h:84-91`），**这样编号和名字不可能
+各走各的** —— 真正的故障模式是某个 preset 在一个文件里写 4 表示 Dom7、在另一个文件里
+写 4 表示 MajStep，那是静默移调，不是编译错误。
+
+四个 chord-step 的音符表**源对源**对照过（V5 `:780-785` 的 `arpeggio[4][4]`）：
+
+| | V5 | 本移植 |
+|---|---|---|
+| MajStep | `[0, 4, 7, 12]` | `[0, 4, 7, 12]` |
+| MinStep | `[0, 3, 7, 12]` | `[0, 3, 7, 12]` |
+| Dom7Step | `[0, 4, 7, 11]` | `[0, 4, 7, 11]` |
+| DimStep | `[0, 3, 6, 9]` | `[0, 3, 6, 9]` |
+
+4 是八度，所以四步的 chord 走位正好回到高八度的根音。
+
+### 6.5.2 定时效果的三个 sub-offset，以及那个 accent 不对称
+
+V5 用 256 Hz 的边界检测，在 `updateControl()` 里拿一个 `uint8_t micron`
+（`(elapsed*64)/interval`，0..63）跟三个阈值比：
+
+```c
+// V5 :6236-6248，两行之间夹着 effect 2 的 32 和 effect 3 的 21 / 42
+if (seq.running && seq.steps[seq.cur].active && gEffect == 2) {
+  if (micron >= 32 && lastMicron < 32) triggerNote(rni, seq.steps[seq.cur].accent, false);
+}
+if (seq.running && seq.steps[seq.cur].active && gEffect == 3) {
+  if ((micron >= 21 && lastMicron < 21) || (micron >= 42 && lastMicron < 42))
+    triggerNote(rni, false, false);
+}
+```
+
+**这条被换掉了，不是照抄的**，理由值得留着：边界检测在 `lastMicron` 卡在阈值上时会抖动
+（循环慢到一帧跨过 21 时会触发；一帧跨过 21 和 42 时会触发两次，行为随负载变），
+而且 256 Hz 在 20 BPM 下一个 step 是 750 ms，帧边界量化到 4 ms 上，听得出来。
+
+换成**名义绝对时间**：`subStepUs = stepStart + interval * off / 64`，从 step 起点算，
+所以第二个 stutter 命中不会相对第一个漂移。`interval * 42` 在 20 BPM 下界是
+`750000 * 42 = 31500000`，离 `uint32` 上限差两个数量级 —— 这个界是**查过的**，
+不是假设的，因为报告里的 `mean` 已经有过一次 16.16 溢出。
+
+`SEQ_SUB_OFF` 源对源对上 V5 的三个阈值，**一个不多一个不少**。
+`Retrig` = 32/64 一次；`Stutter` = 21/64 和 42/64 两次。
+
+**accent 不对称是照抄的，而且是刻意的**：
+
+| | V5 | 含义 |
+|---|---|---|
+| Retrig | `triggerNote(rni, seq.steps[seq.cur].accent, false)` | 保留 accent |
+| Stutter | `triggerNote(rni, false, false)` | **强制取消 accent** |
+
+accent 是滤波包络的一击。一个带 accent 的 stutter 会在一个 step 里把滤波扫三次，
+听起来就不像 stutter 了。
+
+### 6.5.3 那个真正吃劲的改动：sub-hit 之前的强制 drain
+
+**这是 M2.5 里唯一一个不改的话功能就不对的改动，也是 §6.4.2 那个回归类的反向到达。**
+
+V5 的 `triggerNote()` 根本没有 gate —— 没有任何 note-off，所以 V5 没有栈，
+V5 的 retrigger 什么都不需要做。
+
+本移植的引擎**是** gated 的：`on_midi_noteON` 用 `slide = (mvaStack.n > 1)` 判 legato
+（`synthvoice.ino:225`）。所以一个直接 post note-on 的 sub-hit 会把栈深推到 2，
+**它自己变成 legato**：包络不重触发，而且 CC 65 被 arm 着等下一个音。
+
+`seq_subFire()` 因此在 note-on **之前**先 `seqAcidReleaseAll()`。两个变体都建过模：
+
+```
+带 drain：最大深度 1  <- sub-hit 是一个 retrigger
+不带 drain：最大深度 2  <- sub-hit 是第二个声部，并且 arm 了 CC 65
+```
+
+不带的那一版在台架上**听起来不像 bug**。听起来像略微发闷的滑音，
+和下一个音上本不该打开的滤波开口。除非 `held a` 那一行，**日志里没有任何东西会这么说**。
+
+### 6.5.4 验收：一个必须存在的构建，和一个可以预测的数字
+
+**八个出厂 preset 的每一步都是 `SEQ_FX_NONE`** —— 对着 V5 逐字段查过，V5 的 effect 列同样全零。
+所以在正常构建里 sub-step 调度器**永远走不到**，
+验收标准「八个效果的行为和 V5 一样」**根本没法靠听或者靠日志检查**。
+不是「难检查」，是**没有可达路径**。
+
+这个事实会导致三到四个读数看起来完美无缺，而整个功能是缺失的。所以有了一个单独的构建：
+
+| | commit | CI | `SEQ_FX_SELFTEST` |
+|---|---|---|---|
+| 验收 | `4c51f39` | 36975504788 | **1** |
+| 出货 | `9456d22` | 36976291802 | **0** |
+
+预测写在跑之前：**120 BPM，一个 30 s 窗口 240 步 = 15 小节，step 0 是 Retrig 欠 1 次、
+step 1 是 Stutter 欠 2 次，每小节 3 次 → 45 次。** 30 会说明 retrigger 从来没响过，
+60 会说明 stutter 多打了一次 —— 两个都是正确答案的单数字移位，
+这正是让一个预测值得存在的理由。
+
+**上板结果（验收构建，preset 0，step 0-7 上 effect）：**
+
+```
+fx 45 hits  →  90  →  135  →  180  →  225      五个 30 s 窗口
+mean 125000.00 us (+0 us)    max|err| 13 us    catch 0
+held a/s 1/0 (drums n/a)     max late 8 us     subDropped 0    total 1200
+```
+
+算术精确对上 15 小节 × 3。**没有任何 `SHORTWRITES` / `OVERRUN` / `oobCache` / `eng drop` 信号。**
+出货构建（`SEQ_FX_SELFTEST 0`）两个窗口都是 `fx 0 hits`，`subDropped 0`，与 M2 基线一致。
+
+### 6.5.5 离线检查，以及它自己被变异测试过
+
+`tools/test-sequencer.py` 的 M2.5 段全部 PASS。它做的是 M2 那套**手抄**做不到的两件事：
+**解析两个源文件然后对比**（所以「V5 说 42，移植说 43」是失败，不是两个自洽的虚构），
+以及**从固件文本里读接线**（所以「算术对，但 `seq_subPoll()` 从来没被调用」是失败）。
+
+接线检查读出来的顺序关系，每一条都是会咬人的：
+
+- `seq_poll()` 调 `seq_subPoll()` 在 **step 边界的提前 return 之前**（call 675 < guard 695）。
+  顺序有讲究：循环被卡住时 sub-hit 和下一个边界可能同时到期，先轮询能让这一击留在
+  它自己的 step 里；先推进就会拿新 step 重新 arm，然后丢掉它。
+- `seq_subFire()` 调 `seqAcidReleaseAll()` 在**它的 note-on 之前**（drain 1347 < note-on 1518）。
+- `seq_advanceStep()` 调 `seq_subArm()` 在 active 和 rest **两个分支之外**（arm 3425 > 2844）。
+  放在 `if (active)` 里的话每个休止都会跳过，一个过期的 schedule 会在下一小节响。
+
+**Oct Up 的字面量是从 `.ino` 里读出来比的，不是假设的。** 把固件改成 `n += 24` 之后，
+这一段其他检查仍然全绿 —— 因为下面用的模型是从对 V5 的同一次阅读里写的。
+**两个自洽的虚构是相等的。** 把字面量从源码里读出来，是这个检查唯一不是自我转录的版本。
+
+---
+
+## 6.6 M3 Phase 1：Pads + FX assign（**代码完成，上板未验**）
+
+M2.5 把八个效果做出来了，却**没有任何控制面能碰到它们**。这一节是那条路径。
+M3 其余部分不在这个文件里。
+
+### 6.6.1 从 V5 搬过来的，和一个字都没搬的
+
+从 `Acid_Drip_Drum_Acid_Drift_V5.ino` 逐行搬：
+
+| V5 | 行 | 内容 |
+|---|---|---|
+| `FX_PAD_MAP` | `:2115` | `{0,1,2,3,4,5,6,7}`，与 `SEQ_FX_*` 一致 |
+| `doFXAssign()` | `:3614-3636` | 两段式：先选效果，再指派到 step |
+| FUNC+FX 和弦 | `:5721-5745` | pad 7+8（索引 6+7）200 ms 内 |
+| FX assign 接管所有按下 | `:5748-5750` | 除两个 FUNC pad 以外全部 |
+| 抬手退出 | `:5868-5885` | FUNC 抬手退出，其他抬手**不**退出 |
+
+**一处刻意的不同**：V5 直接写 `seq.steps[i].effect`，本移植走 `seq_setStepEffect()`
+并用 `seq_stepEffect()` 读回。这正是留一个 setter 的全部意义 ——
+effect 那一列保持**只有一个写者**。`0..7` / `0..15` 的 pad 重叠是 V5 的，两个 pad
+既选效果又是 step 1-8，`doFXAssign` 是两段式**就是为了**区分它们。
+
+### 6.6.2 唯一不是 port 的东西：引脚表，而且它没有被验证过
+
+V5 跑在 RP2040 上，`PAD_PINS` 是 GPIO 0-22。同样的数字在这个 S3 上已经被占了：
+
+```
+5, 6, 7     I2S_BCLK / I2S_DOUT / I2S_WCLK  <- 音频通路
+15, 16, 17  POT_PINS
+0           strapping pin（BOOT）
+19, 20      原生 USB
+4           MIDIRX_PIN
+26-37       OPI PSRAM，焊在 WROOM 模组里面
+43, 44      UART0，日志就是从这里出来的
+```
+
+原样抄过来会把 pad 接到音频通路占着的引脚上，而**症状会是 DAC 上的噪音，不是编译错误**。
+所以 `config.h` 里换了一张表。
+
+**已知与未知的，分清楚说**：检查证明了它和固件已经占用的东西**没有冲突**
+（测试读的是 `config.h` 的实际内容，不是这份注释）。但**避开冲突不等于正确** ——
+没有任何人读过 AcidBox-S3 按键矩阵的原理图，所以这 16 个引脚**每一个都是猜的**。
+它们是按升序挑的空闲安全 GPIO，一个说得过去的占位，也是一个一旦知道真实接线就该
+立刻替换掉的明显目标。**pad 逻辑没有任何地方依赖这个选择**，只有物理连接器依赖。
+
+### 6.6.3 `g_funcMode` 现在只写不读，这是记在案的缺口
+
+V5 里 `funcMode` 门控 FUNC 页面：它决定一次 pad 按下是进 `doFuncSelect`
+（tempo / preset / order / len）还是落到 step 切换，而且在派发链里排在所有其他模式之前。
+那些页面都还不存在，所以它今天在这里**没有任何东西可以门控** ——
+`funcMode` 置位与置位的可观测差别只有一行 `DEBF`。
+
+留着并且置位有两个理由：删掉它意味着 FX assign 从冷启动直接落进去、
+没有中间状态可以让那些页面往上移植，Phase 3 就得自己发明这个状态并重新推导和弦的含义；
+而且 FX assign 的进入路径依赖它（「先按一次 FUNC，再按一次进 FX」）——
+这是 V5 的两段式手势，没有它到不了。
+
+**一个只写的变量，在一份存在意义就是可核查的文件里，是一个小小的谎**，
+所以诚实的形式是那段注释，而不是假装它是今天在承重的。
+
+### 6.6.4 离线检查，以及两个变异测试
+
+`tools/test-sequencer.py` 的 M3 Phase 1 段全部 PASS：`FX_PAD_MAP` 源对源对照、
+`SEQ_FX_*` enum 读出来确认恒等映射不可能移调、`doFXAssign` 的两段结构对照、
+「port 不写 `seq.steps[]`」、FUNC pad 索引和 200 ms 窗口对照、
+和弦检查在 fxAssign 按下分支**之前**、接线（`regular_checks()` 调用、`INPUT_PULLUP`）、
+以及引脚冲突（I2S / POT / strapping / USB / MIDI / PSRAM 全部不重叠）。
+
+**两条检查都做了变异测试，因为一条不会失败的检查什么也证明不了**：
+删掉 `doFXAssign_M3` 里的 toggle → 触发 toggle 对照那条；
+删掉 `pollPads_M3()` 的调用 → 触发接线那条。都已恢复。
+
+### 6.6.5 构建
+
+CI **37083602986**（`74b01b0`）：**0 errors**，0 个新增警告。
+Sketch `557008 B`（+1088），Globals `59432 B`（+176 —— 正好是新增的 pad 状态数组）。
+
+### 6.6.6 这一节欠着的，不要从上面读出来
+
+- **`PAD_PINS` 是这台板子的真实接线。** 没有原理图。所有检查只证明了它不冲突。
+- **20 ms 消抖在这些触点上够不够。** 形状照 V5，没有在真的抖动开关上量过。
+- **两段式手势好不好发现。** 这是拿着设备的人才能回答的。
+- **PLAY/STOP、FUNC 页面、ch2 generator 都不在这个提交里。** 这只是 FX assign。
+
+---
+
 ## 7. M0 的噪音问题：结论、修复、以及两次自我更正
 
 症状：上电一声爆音，然后持续噪音。**已修复**，出货构建 `dbd9993`。
@@ -1341,6 +1585,7 @@ sketch **554,376 B**（52%），globals **59,232 B**（18%）。
 | `firmware/AcidBox/` | DSP 层（vendored，MIT），**要改的是这里** |
 | `firmware/AcidBox/engine_iface.h` / `.ino` | M1：MIDI 和音序器共用的一条事件入口，`Ch{Acid,Second,Drums}` |
 | `firmware/AcidBox/sequencer.h` / `.ino` | M2：16 步音序器。范围取舍写在 `sequencer.h` 头部 |
+| `firmware/AcidBox/pads_m3.ino` | M3 Phase 1：pad 扫描 + FX assign 子模式。**只有这一部分**，见 §6.6.6 |
 | `tools/merge-image.py` | 合并成 4 MiB 镜像，偏移量从 core 的 CSV 解析 |
 | `tools/test-merge-image.py` | 9 个用例，纯本地 2 秒 |
 | `tools/test-sequencer.py` | 音序器逻辑的本地仿真。**它测的是转写出来的模型，不是固件**，头部有说明 |
