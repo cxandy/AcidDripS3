@@ -2321,8 +2321,8 @@ sequencer.ino   +88   **只有一个 hunk，位置 :1065**
 | `firmware/AcidBox/pads_m3.ino` | M3 Phase 3：pad 扫描 + FX assign + PLAY/STOP + FUNC 页面 + 步进编辑。**手势层**，无显示，见 §6.8.1 |
 | `tools/merge-image.py` | 合并成 4 MiB 镜像，偏移量从 core 的 CSV 解析 |
 | `tools/test-merge-image.py` | 9 个用例，纯本地 2 秒 |
-| `tools/test-sequencer.py` | 音序器逻辑的本地仿真 + **对固件源码的直接断言**。头部有说明它测什么、不测什么；§6.8.9 记着它这一轮被变异测试翻了 6 次 |
-| `C:\Users\Rose\AppData\Local\Temp\opencode\mutate3.py` | **变异 harness，在仓库外**（它会改工作树，而 Phase 3 还没提交，`git checkout --` 会毁掉工作而不是恢复它）。§6.8.9 |
+| `tools/test-sequencer.py` | 音序器逻辑的本地仿真 + **对固件源码的直接断言**。头部有说明它测什么、不测什么；§6.8.9 记着它这一轮被变异测试翻了 6 次。**它最后一行无条件打印 `SUITE COMPLETE`** —— 任何读它输出的工具都必须要求这一行，否则**崩掉的运行和全绿的长得一模一样** |
+| `C:\Users\Rose\AppData\Local\Temp\opencode\mutate3.py` | **变异 harness，在仓库外**。它会改工作树，而它自己的 `finally` 只保证把文件**字节**还原回去 —— 一个半路被杀掉的运行会留下一个脏的工作树，届时 `git checkout --` 恢复的是**已提交的工作**而不是未提交的工作。**Phase 3 现在已经提交**（`882ce25` 起），所以它仍然留在仓库外：它是个一次性的验证工具，不该占仓库里的位置，但 §6.8.9 的数字都要靠它才能复现。§6.8.9 |
 | `.github/workflows/build.yml` | 唯一的构建入口 |
 | `AcidBox/` | 纯净上游，diff 基准，**不要改** |
 | `Acid_Drip_Bassline_and_Drum_Synth/` | 行为参考，**代码不可提交** |
