@@ -127,6 +127,63 @@ const uint8_t POT_PINS[POT_NUM] = {15, 16, 17};
 const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 #endif
 
+/* M3 PADS -- the 16-pad control surface.
+ *
+ * The pin table below is the ONE part of M3 that is NOT a port. V5 runs on an RP2040
+ * whose PAD_PINS are GPIOs 0-22 (Acid_Drip_Drum_Acid_Drift_V5.ino:477-480); those same
+ * numbers on this S3 are already spoken for:
+ *
+ *     5, 6, 7     I2S_BCLK / I2S_DOUT / I2S_WCLK  -- the audio path
+ *     15, 16, 17  POT_PINS
+ *     0           strapping pin (BOOT), the board will not always boot if this is pulled
+ *     19, 20      native USB pair
+ *     4           MIDIRX_PIN
+ *     26-37       OPI PSRAM, soldered inside the WROOM module
+ *     43, 44      UART0 TX/RX, which is where the debug log comes out
+ *
+ * Copying V5's array verbatim would therefore put pads on pins the audio path owns, and
+ * the symptom would be noise on the DAC rather than a compile error -- so the array below
+ * is picked from what is left.
+ *
+ * WHAT IS AND IS NOT KNOWN ABOUT IT. The table avoids everything the firmware already
+ * claims, and tools/test-sequencer.py asserts that rather than trusting this comment. But
+ * avoiding a collision is not the same as being correct: no schematic for the AcidBox-S3
+ * pad matrix has been read, so all sixteen of these are a guess at a board layout that has
+ * not been confirmed. They are the free, safe GPIOs in ascending order, which is a
+ * defensible placeholder and an obvious one to replace the moment the real wiring is
+ * known. Nothing about the pad LOGIC depends on the choice -- only the physical
+ * connector does.
+ *
+ * Two pads that are already claimed by the port and must not be moved without also
+ * updating the tests: PAD_FUNC_A/B are indices 6 and 7, i.e. physical pads 7 and 8, which
+ * is V5's FUNC chord (:482-485), and the test compares those two #defines against V5's.
+ */
+#define NUM_PADS 16
+const uint8_t PAD_PINS[NUM_PADS] = {
+  1, 2, 3, 8, 9, 10, 11, 12,     // pads 1-8   top row: FX picker, and steps 1-8
+  13, 14, 18, 21, 38, 39, 40, 41 // pads 9-16  bottom row: steps 9-16
+};
+
+/* Debounce window, in ms. The scheme is V5's shape: any raw edge restarts the timer, and
+ * the pad only changes state once the level has held for longer than this. 20 ms is the
+ * usual figure for a tactile switch, and it has NOT been measured on these contacts --
+ * see the note in pads_m3.ino about what is and is not evidence here. */
+#define PAD_DEBOUNCE_MS 20
+
+/* Chord window, in ms. V5 compares `now - pDown[other] < 200` at :5721-5722, so this is
+ * V5's number rather than a fresh choice: the same two pads inside the same window has to
+ * mean the same gesture, or the port's FUNC chord is not V5's FUNC chord. */
+#define CHORD_WINDOW_MS 200
+
+#define PAD_PLAY_A  0   // pads 1+2 = PLAY/STOP  (V5 :482)
+#define PAD_PLAY_B  1
+#define PAD_FUNC_A  6   // pads 7+8 = FUNC toggle (V5 :484)
+#define PAD_FUNC_B  7
+#define MIX_PAD_A  14   // pads 15+16 = MIX EDIT chord (V5 :5711-5719)
+#define MIX_PAD_B  15
+#define BM_SW_A     8   // pads 9+10 = CH2 EDIT chord (V5 :5765-5793)
+#define BM_SW_B     9
+
 /* M0 diagnostics */
 #define M0_DIAG 0     // the M0 diagnostic block. Off now: it has done its job and it is
                      // not shippable, because mode 2 writes a known-silent buffer to

@@ -1034,6 +1034,304 @@ print("      seq_subFire() actually holds the gate at depth 1 in the engine. Bot
 print("      build with SEQ_FX_SELFTEST 1 and a serial capture: the prediction is 45 sub-hits")
 print("      per 30 s window with `held a/s 1/0`. Offline arithmetic cannot reach either.")
 
+# ===================================================================== M3 Phase 1: pads + FX assign
+#
+# Same discipline as M2.5, applied to the pad layer: parse V5 and the port, compare them
+# source to source, and read the WIRING out of the shipped text rather than modelling it.
+#
+# The one thing this section CANNOT check is stated up front rather than left to be
+# discovered later: PAD_PINS. V5's array is RP2040 GPIOs and cannot be reused on the S3
+# (5/6/7 are I2S, 16/17 are POT_PINS, 0 is a strapping pin, 19/20 are USB). config.h
+# therefore carries a re-picked S3 table, and that table is a claim about board wiring
+# with no schematic behind it. What IS checkable here is that it collides with nothing
+# already claimed -- see the pin-collision block below.
+print()
+print("=" * 78)
+print("M3 Phase 1: pads + FX assign -- V5 logic parsed and compared, wiring read from source")
+print("=" * 78)
+
+PAD_INO = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "firmware", "AcidBox", "pads_m3.ino")
+BOX_INO = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "firmware", "AcidBox", "AcidBox.ino")
+
+m3_fail = []
+
+v5_src = read(V5_MAIN)
+cfg_src = read(CONFIG_H)
+pad_src = read(PAD_INO) if os.path.exists(PAD_INO) else ""
+box_src = read(BOX_INO)
+
+
+def fn_body(src, name):
+    """Body of a function, brace-matched from its opening brace."""
+    if name not in src:
+        return ""
+    i = src.index(name)
+    j = src.index("{", i)
+    depth, k = 0, j
+    while k < len(src):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[j:k + 1]
+        k += 1
+    return ""
+
+
+print()
+print("  FX_PAD_MAP: V5's table against the port's, source to source")
+print("  " + "-" * 74)
+
+v5_fxmap = [int(x) for x in re.search(
+    r"FX_PAD_MAP\s*\[\s*8\s*\]\s*=\s*\{([^}]*)\}", v5_src).group(1).split(",")]
+port_fxmap = [int(x) for x in re.search(
+    r"G_FX_PAD_MAP\s*\[\s*8\s*\]\s*=\s*\{([^}]*)\}", pad_src).group(1).split(",")]
+
+if v5_fxmap == port_fxmap:
+    print("  [PASS] identical to V5                                 %s" % port_fxmap)
+else:
+    m3_fail.append("G_FX_PAD_MAP is %s, V5's FX_PAD_MAP is %s" % (port_fxmap, v5_fxmap))
+    print("  [FAIL] port %s vs V5 %s" % (port_fxmap, v5_fxmap))
+
+# The map is an identity, and that is only safe if the effect enum is too. Read the enum
+# values out of sequencer.h rather than assuming 0..7: a reordering of SEQ_FX_* would
+# silently transpose every pad.
+seq_h_src = read(PORT_H)
+enum_vals = {}
+for m2 in re.finditer(r"SEQ_FX_([A-Z0-9]+)\s*=\s*(\d+)", seq_h_src):
+    enum_vals[m2.group(1)] = int(m2.group(2))
+expect_names = ["NONE", "OCTUP", "RETRIG", "STUTTER", "MAJSTEP", "MINSTEP", "DOM7STEP", "DIMSTEP"]
+got_enum = [enum_vals.get(n, -1) for n in expect_names]
+if got_enum == list(range(8)):
+    print("  [PASS] SEQ_FX_* is 0..7 in pad order, so the identity map is safe")
+else:
+    m3_fail.append("SEQ_FX_* enum is not 0..7 in pad order: %s" % got_enum)
+    print("  [FAIL] SEQ_FX_* enum order is %s" % got_enum)
+
+print()
+print("  doFXAssign(): V5's stage structure against the port's")
+print("  " + "-" * 74)
+
+v5_fx = fn_body(v5_src, "void doFXAssign(")
+pt_fx = fn_body(pad_src, "doFXAssign_M3(")
+
+if not pt_fx:
+    m3_fail.append("doFXAssign_M3() not found in pads_m3.ino")
+    print("  [FAIL] doFXAssign_M3() not found")
+else:
+    for label, ok in [
+        ("stage 1 gated on no-FX-selected",
+         "fxAssignHasFx" in v5_fx and "g_fxAssignHasFx" in pt_fx),
+        ("stage 1 selects from the top row only (< 8)",
+         bool(re.search(r"padIdx\s*<\s*8", v5_fx)) and
+         bool(re.search(r"padIdx\s*<\s*8", pt_fx))),
+        ("re-tapping the selected button deselects",
+         "fxAssignHasFx = false" in v5_fx and "g_fxAssignHasFx = false" in pt_fx),
+        ("stage 2 gated on NUM_STEPS in V5 / NUM_PADS in the port",
+         bool(re.search(r"padIdx\s*<\s*NUM_STEPS", v5_fx)) and
+         bool(re.search(r"padIdx\s*<\s*NUM_PADS", pt_fx))),
+        ("assignment is a toggle (fx if different, NONE if same)",
+         bool(re.search(r"==\s*fxAssignFx\s*\)\s*\?\s*0\s*:", v5_fx)) and
+         bool(re.search(r"==\s*g_fxAssignFx\s*\)\s*\?\s*SEQ_FX_NONE\s*:", pt_fx))),
+    ]:
+        if ok:
+            print("  [PASS] %s" % label)
+        else:
+            m3_fail.append(label)
+            print("  [FAIL] %s" % label)
+
+    # The load-bearing difference: V5 writes the field, the port must call the setter.
+    if "seq_setStepEffect(" in pt_fx:
+        print("  [PASS] port assigns through seq_setStepEffect(), not a direct field write")
+    else:
+        m3_fail.append("doFXAssign_M3 does not go through seq_setStepEffect()")
+        print("  [FAIL] port assigns without seq_setStepEffect()")
+
+    if "seq.steps[" in pt_fx:
+        m3_fail.append("doFXAssign_M3 writes seq.steps[] directly")
+        print("  [FAIL] port writes seq.steps[] directly -- two writers for the effect column")
+    else:
+        print("  [PASS] port never writes seq.steps[] -- the effect column keeps one writer")
+
+    if re.search(r"seq_stepEffect\s*\(\s*padIdx\s*\)", pt_fx):
+        print("  [PASS] port reads the current effect back through seq_stepEffect()")
+    else:
+        m3_fail.append("doFXAssign_M3 does not read the current effect through seq_stepEffect()")
+        print("  [FAIL] port does not read the current effect through seq_stepEffect()")
+
+print()
+print("  chord + mode handling, read out of both sources")
+print("  " + "-" * 74)
+
+# V5 :482-485 defines PAD_PLAY_A/B and PAD_FUNC_A/B. If the port's FUNC pads are not the
+# same two pads, the gesture is not the gesture.
+v5_func = {}
+for nm in ("PAD_PLAY_A", "PAD_PLAY_B", "PAD_FUNC_A", "PAD_FUNC_B"):
+    m3 = re.search(r"#define\s+%s\s+(\d+)" % nm, v5_src)
+    v5_func[nm] = int(m3.group(1)) if m3 else None
+cfg_func = {}
+for nm in ("PAD_PLAY_A", "PAD_PLAY_B", "PAD_FUNC_A", "PAD_FUNC_B"):
+    m3 = re.search(r"#define\s+%s\s+(\d+)" % nm, cfg_src)
+    cfg_func[nm] = int(m3.group(1)) if m3 else None
+
+if v5_func == cfg_func and v5_func.get("PAD_FUNC_A") is not None:
+    print("  [PASS] FUNC pads are the same two pads as V5                 %s" % cfg_func)
+else:
+    m3_fail.append("pad index #defines differ: V5 %s, port %s" % (v5_func, cfg_func))
+    print("  [FAIL] V5 %s vs port %s" % (v5_func, cfg_func))
+
+# V5's chord window is a literal 200 ms; the port's is CHORD_WINDOW_MS. Compare values.
+v5_win = re.search(r"now\s*-\s*pDown\[PAD_FUNC_\w\]\s*\)\s*<\s*(\d+)", v5_src)
+port_win = re.search(r"#define\s+CHORD_WINDOW_MS\s+(\d+)", cfg_src)
+if v5_win and port_win and int(v5_win.group(1)) == int(port_win.group(1)):
+    print("  [PASS] chord window is V5's %s ms" % port_win.group(1))
+else:
+    m3_fail.append("chord window: V5 %s, port %s" %
+                   (v5_win.group(1) if v5_win else None,
+                    port_win.group(1) if port_win else None))
+    print("  [FAIL] chord window V5 %s vs port %s" %
+          (v5_win.group(1) if v5_win else None,
+           port_win.group(1) if port_win else None))
+
+pt_poll = fn_body(pad_src, "void pollPads_M3(")
+if not pt_poll:
+    m3_fail.append("pollPads_M3() not found in pads_m3.ino")
+    print("  [FAIL] pollPads_M3() not found")
+else:
+    for label, ok in [
+        ("chord checked BEFORE the fxAssignMode press branch",
+         pt_poll.index("CHORD_WINDOW_MS") < pt_poll.index("doFXAssign_M3(i)")),
+        ("releasing a chord member is ignored, not read as a tap",
+         re.search(r"if\s*\(\s*pChord_arr\[i\]\s*\)\s*\{[^}]*continue", pt_poll) is not None),
+        ("FX-assign press branch covers every pad that is not a chord",
+         re.search(r"if\s*\(\s*g_fxAssignMode\s*\)\s*\{\s*doFXAssign_M3\(i\);", pt_poll) is not None),
+    ]:
+        if ok:
+            print("  [PASS] %s" % label)
+        else:
+            m3_fail.append(label)
+            print("  [FAIL] %s" % label)
+
+    # The release half. Located by its own comment rather than by rindex(), because
+    # rindex("continue") over the whole function finds the chord branch's -- which sits
+    # ABOVE the release code, so the ordering test inverted and reported a FAIL on code
+    # that behaves correctly. Slice from the release marker down instead.
+    _rel = pt_poll[pt_poll.find("---- RELEASE ----"):] if "---- RELEASE ----" in pt_poll else ""
+    for label, ok in [
+        ("release section located", bool(_rel)),
+        ("FUNC release exits FX-assign",
+         re.search(r"i == PAD_FUNC_A \|\| i == PAD_FUNC_B", _rel) is not None),
+        ("non-FUNC release does NOT exit -- the exit is inside the FUNC test",
+         bool(_rel) and
+         "g_fxAssignMode = false" in _rel and
+         re.search(r"if\s*\(\s*i == PAD_FUNC_A \|\| i == PAD_FUNC_B\s*\)\s*\{[^}]*"
+                   r"g_fxAssignMode = false", _rel) is not None),
+    ]:
+        if ok:
+            print("  [PASS] %s" % label)
+        else:
+            m3_fail.append(label)
+            print("  [FAIL] %s" % label)
+
+print()
+print("  WIRING: is any of this actually called?")
+print("  " + "-" * 74)
+
+if "pollPads_M3" in box_src:
+    print("  [PASS] AcidBox.ino references pollPads_M3()")
+else:
+    m3_fail.append("pollPads_M3() is never called from AcidBox.ino")
+    print("  [FAIL] pollPads_M3() is never called")
+
+# It has to be called from regular_checks(), which loop() runs -- not merely mentioned.
+rc = fn_body(box_src, "void regular_checks()")
+if "pollPads_M3()" in rc:
+    print("  [PASS] regular_checks() calls it -- loop() reaches it")
+else:
+    m3_fail.append("pollPads_M3() is not called from regular_checks()")
+    print("  [FAIL] regular_checks() does not call pollPads_M3()")
+
+if re.search(r"pinMode\s*\(\s*PAD_PINS\[i\]\s*,\s*INPUT_PULLUP\s*\)", box_src):
+    print("  [PASS] pads are pinMode'd INPUT_PULLUP in setup() -- active-low reads are real")
+else:
+    m3_fail.append("PAD_PINS are never put in INPUT_PULLUP")
+    print("  [FAIL] PAD_PINS never put in INPUT_PULLUP")
+
+if re.search(r"void\s+pollPads_M3\s*\(\s*\)\s*\{", pad_src):
+    print("  [PASS] pollPads_M3() has a definition, not just a declaration")
+else:
+    m3_fail.append("pollPads_M3() has no definition")
+    print("  [FAIL] pollPads_M3() has no definition")
+
+if re.search(r"#define\s+DEBUG_ON", cfg_src):
+    print("  [PASS] DEBUG_ON is defined, so the DEBF diagnostics in pads_m3.ino compile in")
+else:
+    print("  [note] DEBUG_ON is off -- pads_m3.ino's DEBF lines compile away to nothing")
+
+print()
+print("  pad pins: no collision with what the firmware already claims")
+print("  " + "-" * 74)
+
+m4 = re.search(r"PAD_PINS\s*\[\s*NUM_PADS\s*\]\s*=\s*\{([^}]*)\}", cfg_src)
+# Strip line comments before reading the numbers. Without this the trailing
+# "// pads 1-8 ... steps 9-16" contributes its own digits and the table reads as
+# 22 pins -- which is what the first run of this check reported.
+_pin_body = re.sub(r"//[^\n]*", "", m4.group(1)) if m4 else ""
+port_pins = [int(x) for x in re.findall(r"\d+", _pin_body)] if m4 else []
+if len(port_pins) == 16 and len(set(port_pins)) == 16:
+    print("  [PASS] 16 distinct pins declared                             %s" % port_pins)
+else:
+    m3_fail.append("PAD_PINS is %d entries, %d distinct" % (len(port_pins), len(set(port_pins))))
+    print("  [FAIL] PAD_PINS has %d entries / %d distinct" %
+          (len(port_pins), len(set(port_pins))))
+
+hits = sorted(set(port_pins) & {5, 6, 7, 15, 16, 17, 0, 19, 20, 4})
+if hits:
+    m3_fail.append("PAD_PINS collides with I2S / POT / strapping / USB / MIDI pins: %s" % hits)
+    print("  [FAIL] collides with pins the firmware already owns: %s" % hits)
+else:
+    print("  [PASS] no overlap with I2S (5,6,7), POT (15,16,17), strapping (0),")
+    print("         USB (19,20) or MIDI (4,15) -- HARDWARE_SETUP.md section 2")
+
+# ESP32-S3: GPIO 26..37 are occupied by OPI PSRAM inside the WROOM module.
+psram_hits = sorted(set(port_pins) & set(range(26, 38)))
+if psram_hits:
+    m3_fail.append("PAD_PINS uses PSRAM GPIOs: %s" % psram_hits)
+    print("  [FAIL] uses PSRAM GPIOs: %s" % psram_hits)
+else:
+    print("  [PASS] avoids 26..37, which OPI PSRAM occupies inside the module")
+
+# GPIO 45/46 are the VDD_SPI strapping pins on the S3 -- an input with a pull-up on 46
+# is a boot hazard even if it happens to read correctly after boot.
+strap_hits = sorted(set(port_pins) & {45, 46, 0})
+if strap_hits:
+    m3_fail.append("PAD_PINS uses strapping pins: %s" % strap_hits)
+    print("  [FAIL] uses strapping pins: %s" % strap_hits)
+else:
+    print("  [PASS] avoids the strapping pins (0, 45, 46)")
+
+print()
+print("  " + "-" * 74)
+print("  M3 PHASE 1: %s" % ("ALL PASS" if not m3_fail else "*** %d FAIL ***" % len(m3_fail)))
+for f in m3_fail:
+    print("    FAILED: %s" % f)
+
+print()
+print("  Still NOT settled by anything above, stated so it is not over-read:")
+print("    - that PAD_PINS is the board's actual wiring. No schematic was consulted; the")
+print("      checks above only prove the table collides with nothing the firmware already")
+print("      claims. Every one of the 16 is a guess until someone reads the board.")
+print("    - that the debounce behaves on real contacts. 20 ms and the edge-restart scheme")
+print("      are modelled from V5's shape, not measured on a bouncing switch.")
+print("    - that the gesture feels like V5's. Sequencing FX onto a step is only reachable")
+print("      by the two-stage pad gesture, and whether that is discoverable is a question")
+print("      for a person holding the device.")
+print("    - PLAY/STOP, the FUNC pages (tempo/preset/order/len) and the ch2 generator are")
+print("      not in this file. This is FX-assign only.")
+
 # ===================================================================== declaration / definition agreement
 #
 # Written because CI 36974920807 rejected this milestone for a two-character edit: the

@@ -413,7 +413,8 @@ delay(200);
 
   buildTables();
 
-  for (int i = 0; i < POT_NUM; i++) pinMode( POT_PINS[i] , INPUT);
+  for (int i = 0; i < POT_NUM; i++) pinMode(POT_PINS[i], INPUT);
+  for (int i = 0; i < NUM_PADS; i++) pinMode(PAD_PINS[i], INPUT_PULLUP);
 
   Synth1.Init();
   Synth2.Init();
@@ -588,7 +589,27 @@ void jukebox_tick() {
 #endif
 
 
+/* M3: forward declaration, not decoration.
+ *
+ * Arduino concatenates the .ino files in this directory into one translation unit in
+ * ALPHABETICAL order, so pads_m3.ino (p) sorts AFTER AcidBox.ino (A) and regular_checks()
+ * below would otherwise be calling a function the compiler has not seen yet. The .ino
+ * suffix hides that ordering entirely -- there is no #include to follow -- which is the
+ * same trap as engine_iface.h / sequencer.h / esp_flash.h at the top of this file, and the
+ * reason those are included explicitly rather than relied upon.
+ *
+ * The pad state itself lives in pads_m3.ino, next to the code that owns it, rather than
+ * here. Nothing outside that file reads it, and a state block that lives 500 lines from
+ * its only writer is a state block nobody updates.
+ */
+extern void pollPads_M3();
+
 void regular_checks() {
+  // First, and before anything else in this function: pad state is edge-detected, so a
+  // gesture that arrives while regular_checks() is blocked inside something below is
+  // still seen -- just later. Nothing here blocks (MIDI.read() does not), so the pad
+  // latency is the loop period and not the distance through this function.
+  pollPads_M3();
   timer1_fired = false;
 
 #if M0_DIAG
