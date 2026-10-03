@@ -100,7 +100,21 @@ static uint8_t  g_fxAssignFx    = 0;
 
 /* The selected FUNC page. G_FUNC_NONE rather than an int8_t -1, so the comparison in the
  * dispatch chain is one unsigned compare and the log prints a number rather than a
- * character. */
+ * character.
+ *
+ * G_FUNC_NONE is defined HERE, next to the initialiser that needs it, and NOT down with the
+ * eight page indices. A #define has to precede its first use, this line is that first use, and
+ * when it lived with its siblings the sketch compiled fine for all of M3 Phase 3 and then
+ * failed in CI (37092153213) with "'G_FUNC_NONE' was not declared in this scope" -- after 31
+ * mutations had gone green, because nothing in the offline suite looks at declaration order.
+ * It reads source text; it does not compile.
+ *
+ * Dropping the initialiser instead is not a way out: an uninitialised static is 0, and 0 is
+ * G_FUNC_KEY, so every boot would start on the KEY page. The sentinel has to exist, and it has
+ * to exist above its use. Moving this line back down is the tidying that breaks it again, which
+ * is why the reason is here rather than in the git history. */
+#define G_FUNC_NONE   0xFF
+
 static uint8_t  g_funcSel       = G_FUNC_NONE;
 
 /* =====================================================================
@@ -131,7 +145,6 @@ static uint8_t  g_funcSel       = G_FUNC_NONE;
  * It is a bitmask, not an array of bools, because the test reads it and a list of five
  * booleans with a comment is a list that can fall out of step with a switch elsewhere.
  */
-#define G_FUNC_NONE   0xFF
 #define G_FUNC_KEY    0      // V5 slot 0 -- not implemented
 #define G_FUNC_PAT    1      // V5 FUNC_PAT     top row 1-8 loads preset 0-7
 #define G_FUNC_CH2    2      // V5 FUNC_SOUND   top row 1-8 sets the ch2 pitch mode

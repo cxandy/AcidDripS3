@@ -595,6 +595,22 @@ def absent_in(block, token, exists_in=None):
     return bool(block) and token not in block
 
 
+def at(lst, i):
+    """lst[i], or None when the list is shorter than i.
+
+    Added because of a mutation that compacted the page table from 8 entries to 5. The LENGTH
+    check reported the problem correctly, on the line before this one raised IndexError and
+    ended the suite with 50 further checks unrun -- and rounds 1 to 5 all scored that mutation
+    "caught", because a FAIL had appeared before the crash. It had not been caught. It had
+    ended the run.
+
+    So a check that cannot read its input has to report what it could not read. The harness
+    decides caught-ness by scanning stdout for [FAIL], and a stopped process leaves no [FAIL]
+    behind, which makes stopping the program indistinguishable from having nothing to say.
+    """
+    return lst[i] if 0 <= i < len(lst) else None
+
+
 def strip_comments(src):
     """Source with // and /* */ comments blanked out (newlines kept, so offsets survive).
 
@@ -2030,14 +2046,18 @@ p3("the port's page table is the same LENGTH, so the two compare element by elem
 # The whole point of keeping V5's numbering: the four pages the port implements that also
 # exist in V5 must sit at the SAME index. A compacted 5-entry table would compare unequal
 # everywhere and say nothing, which is why this is asserted index by index.
-_same = [i for i in range(8) if v5_names[i] == port_names[i]]
+# Bounded by the shorter of the two, not by 8. The LENGTH check above already says the tables
+# disagree in length; this one has to survive that disagreement in order to report anything.
+_same = [i for i in range(8)
+         if at(v5_names, i) is not None and at(port_names, i) is not None
+         and v5_names[i] == port_names[i]]
 p3("the pages that exist in both are at the SAME index as V5",
    _same == [1, 4, 5, 6, 7], "agreeing at %s" % _same)
 for i in _same:
     if i != 4:
         p3("  slot %d is %r in both" % (i, v5_names[i]), True)
 p3("slot 2 is the one rename: V5 'SOUND', port 'CH2'",
-   v5_names[2] == "SOUND" and port_names[2] == "CH2",
+   at(v5_names, 2) == "SOUND" and at(port_names, 2) == "CH2",
    "the port has one engine, so SOUND has nothing to select")
 
 # The table comparison above is about NAMES. It says nothing about the page CONSTANTS, and
@@ -2071,6 +2091,33 @@ _port_defs = dict((m.group(1), int(m.group(2))) for m in
 _PORT_SLOT_IS_V5 = {"KEY": "FUNC_KEY", "PAT": "FUNC_PAT", "CH2": "FUNC_SOUND",
                     "WALK": "FUNC_WALK", "FX": "FUNC_FX", "TEMPO": "FUNC_TEMPO",
                     "PLEN": "FUNC_PLEN", "ORDER": "FUNC_PATMODE"}
+
+# Every G_FUNC_* macro must be defined as a plain number, and this check exists because the two
+# checks that resolve those numbers used to assume it and die instead of reporting.
+#
+# The failure mode is the point, not the exception. `re.search(...).group(1)` against a define
+# whose value is a NAME returns None and raises, and that ends the suite mid-run. Since the
+# mutation harness decides "caught" by looking for [FAIL] in stdout, and a traceback goes to
+# stderr, a suite that DIES is indistinguishable from a suite that PASSES -- the run reads as
+# "this check cannot see the change", and every check after the crash is silently not run.
+#
+# Same reasoning as absent_in(): unable to resolve is not the same as absent, so this reports
+# the unresolvable ones by name.
+# Resolved independently of _port_defs, and NOT by widening it. _port_defs deliberately holds
+# only decimal page values, because "distinct and cover 0-7" reads its values() and G_FUNC_NONE's
+# 0xFF would break that check. So this resolves the page constants on its own and simply skips
+# the two macros that are not page values: NONE, which is the hex sentinel, and IMPL, which is a
+# mask expression rather than a value. What is left is exactly the eight the dispatch switches on.
+_gf_all = sorted(set(re.findall(r"#define\s+(G_FUNC_[A-Z0-9_]+)\b", pad_src)))
+_gf_pages = [n for n in _gf_all if n not in ("G_FUNC_NONE", "G_FUNC_IMPL")]
+_gf_nonnum = [n for n in _gf_pages
+              if re.search(r"#define\s+%s\s+\d+\b" % re.escape(n), pad_src) is None]
+p3("every page constant is a plain number, so the checks below can resolve it",
+   len(_gf_pages) == 8 and not _gf_nonnum,
+   "not a numeric value: %s" % _gf_nonnum if _gf_nonnum
+   else "%d page constants, all decimal (NONE=0xFF and IMPL=mask are not page values)"
+        % len(_gf_pages))
+
 p3("the port defines one constant per page, eight of them",
    sorted(_port_defs) == sorted(_PORT_SLOT_IS_V5), str(sorted(_port_defs)))
 _p13_wrong = dict((k, (_port_defs[k], _v5_idx.get(_PORT_SLOT_IS_V5[k])))
@@ -2084,7 +2131,7 @@ p3("the eight constants are distinct and cover 0-7, so no page shadows another",
    sorted(_port_defs.values()) == list(range(8)),
    "G_FUNC_TEMPO 3 would collide with G_FUNC_WALK 3, which is how mutation 13 shows up here")
 p3("the two unimplemented pages are marked dead, not renamed into something",
-   port_names[0] == "-" and port_names[3] == "-",
+   at(port_names, 0) == "-" and at(port_names, 3) == "-",
    "slot 0 KEY and slot 3 WALK")
 
 # The implemented set, as a mask read from the source, must be exactly the pages with an arm
@@ -2099,10 +2146,17 @@ if _m:
         if d:
             impl_bits.add(int(d.group(1)))
 _apply = fn_body(pad_src, "static void doFuncApply_M3(")
-_arms = set(int(x) for x in re.findall(r"case G_FUNC_(\w+):", _apply)
-            for x in [re.search(r"#define\s+G_FUNC_%s\s+(\d+)" % x, pad_src).group(1)])
+# Resolved through _port_defs rather than by re-reading each #define, and the arms that cannot
+# be resolved are NAMED instead of raised on. The previous version called .group(1) on the
+# result of a search that returns None whenever a page constant's value is not a digit, so
+# making one of them a name killed the suite here instead of reporting.
+_arm_names = re.findall(r"case G_FUNC_(\w+):", _apply)
+_arm_unres = sorted(nm for nm in _arm_names if nm not in _port_defs)
+_arms = set(_port_defs[nm] for nm in _arm_names if nm in _port_defs)
 p3("G_FUNC_IMPL lists exactly the pages that have an apply arm, plus FX",
-   impl_bits == _arms | {4}, "IMPL %s, arms %s, +FX" % (sorted(impl_bits), sorted(_arms)))
+   not _arm_unres and impl_bits == _arms | {4},
+   "unresolvable arms: %s" % _arm_unres if _arm_unres
+   else "IMPL %s, arms %s, +FX" % (sorted(impl_bits), sorted(_arms)))
 
 # TEMPO_PRESETS, V5 :1171 -- the tempo page's values have to be V5's or the page is a
 # different instrument.
@@ -2419,6 +2473,35 @@ p3("every pad/step number in the log is 1-BASED, matching pad N == step N",
    "0-based: %s" % _p3_offby if _p3_offby
    else "%d statements naming a pad or a step, all +1" % _p3_counted)
 
+
+# Every macro this file DEFINES is defined before its first USE. C has no two-pass lookup for a
+# #define, and this is the whole of what this check is about -- it exists because CI caught
+# "'G_FUNC_NONE' was not declared in this scope" (37092153213) on a tree where 31 mutations and
+# every offline check were green.
+#
+# It is worth being explicit that the suite could never have seen this. Its subject is source
+# TEXT; declaration order and name resolution belong to the preprocessor and the compiler. So
+# this is not a gap that more care elsewhere would have closed -- it is a whole class of defect
+# outside this suite's remit, and the honest response is one narrow check plus a compiler, not a
+# general parser. Second compile-only defect in the port after f464c01's s->x, same shape both
+# times: a green suite, then a red CI.
+#
+# Read comment-stripped, so offsets stay comparable and a comment explaining the rule cannot be
+# what trips it. A macro's first mention inside its own #define line is after that line's start,
+# so it never counts as a use-before-define.
+_p3_late = []
+_p3_macros = list(re.finditer(r"^[ \t]*#define[ \t]+([A-Za-z_]\w*)", strip_comments(pad_src), re.M))
+_pc3 = strip_comments(pad_src)
+for _md in _p3_macros:
+    _nm, _at = _md.group(1), _md.start()
+    _us = re.search(r"\b%s\b" % re.escape(_nm), _pc3)
+    if _us and _us.start() < _at:
+        _p3_late.append("%s used at %d, defined at %d" % (_nm, _us.start(), _at))
+p3("every macro pads_m3.ino defines is defined before its first use",
+   bool(_p3_macros) and not _p3_late,
+   "late: %s" % _p3_late if _p3_late
+   else "%d macros, all defined before use" % len(_p3_macros))
+
 print()
 print("  " + "-" * 74)
 print("  M3 PHASE 3: %s" % ("ALL PASS" if not p3_fail else "*** %d FAIL ***" % len(p3_fail)))
@@ -2529,3 +2612,15 @@ if phsrc and psrc:
     print("      check for the one drift that CI found the expensive way.")
 else:
     check("sources readable", False)
+
+# The last line of the program, printed unconditionally, and the only signal that says the run
+# FINISHED. It exists because a Python traceback ends the process mid-file while leaving stdout
+# holding no [FAIL] at all, so "no failures" and "died before reaching the failing check" are
+# the same output. Both the mutation harness and verdicts.py require this line; without it a
+# crashed run is reported as a green one, which is how a mutation that kills the suite ends up
+# filed under "a check cannot see this change".
+#
+# It has to be the last thing in the file, and unconditional. A sentinel guarded by "if nothing
+# failed" would be absent exactly when it is needed.
+print()
+print("SUITE COMPLETE")
