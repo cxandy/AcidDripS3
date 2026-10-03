@@ -570,6 +570,137 @@ def flat_tokens(src, decl):
     return [t.strip() for t in body.split(",") if t.strip()]
 
 
+def absent_in(block, token, exists_in=None):
+    """`token not in block`, but only once the claim has been made falsifiable.
+
+    Three separate mutation survivors came out of the naive `token not in block` form, and
+    they are three different ways for it to be worthless:
+
+      - block_at() returns brace-to-brace, so anything in the CONDITION of an `if` is outside
+        the slice. A chord time window added to the condition left the extracted text
+        identical and the check green (mutation 4).
+      - `block` can be the empty string because the anchor was not found at all, and
+        `x not in ""` is True for every x. A renamed or deleted function satisfies its own
+        absence check (the same failure shape as mutation 4).
+      - the TOKEN can be a name that appears nowhere in the firmware. Mutation 22 searched
+        for "SetStepEffect"; the port's setter is `seq_setStepEffect`. The string was never
+        in any file, so "not in" was permanently true and the check asserted nothing.
+
+    So `block` must be non-empty, and when `exists_in` is given the token must be found
+    somewhere else in the sources first. That last part is what turns a typo into a red
+    suite: you cannot report a thing as absent until you have shown it is present.
+    """
+    if exists_in is not None and token not in exists_in:
+        return False
+    return bool(block) and token not in block
+
+
+def strip_comments(src):
+    """Source with // and /* */ comments blanked out (newlines kept, so offsets survive).
+
+    Added because of a check that FAILED on correct code: "the factory reset must not stop
+    the sequencer" was written as `"seq_stop" not in body`, and the body contains the words
+    `seq_stop()` inside the comment explaining why the function does not call it. A
+    comment that explains a rule is the first thing a rule check should meet, not the thing
+    that should satisfy or break it.
+
+    Blank rather than delete, so brace counts stay right for block_at() and line positions
+    stay comparable with the original.
+
+    Known limitation, stated rather than hidden: it does not know about string literals, so
+    a `//` inside a string would be treated as a comment. None of this firmware's DEBF
+    format strings contain one, and the failure mode if that ever changes is a check
+    reading slightly less code than it should -- not a false PASS.
+    """
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and src[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (src[i] == "*" and src[i + 1] == "/"):
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            i += 2
+            out.append("  ")
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def block_at(src, anchor, after=0):
+    """Brace-matched block starting at the first `{` at or after `anchor` + `after`.
+
+    `anchor` is an index, or a substring to locate first (index -1 if absent, which yields
+    "" rather than raising).
+
+    Exists because a regex like `if\\s*\\(x\\)\\s*\\{[^}]*continue` looks like a structural
+    check and is not one: `[^}]*` cannot cross a nested brace, so the moment a branch grows an
+    if/else inside it the regex silently stops matching and the check reports FAIL on code
+    whose behaviour it was written to confirm. That is not hypothetical -- it is exactly what
+    happened to "releasing a chord member is ignored" in M3 Phase 3, when the chord block
+    gained the PLAY-stop action and an if/else inside it.
+
+    Returns "" when the anchor is absent or unbalanced, so callers can test the result
+    without a try/except.
+    """
+    if isinstance(anchor, str):
+        anchor = src.find(anchor)
+        if anchor < 0:
+            return ""
+    j = src.find("{", anchor + after)
+    if j < 0:
+        return ""
+    depth, k = 0, j
+    while k < len(src):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[j:k + 1]
+        k += 1
+    return ""
+
+
+def stmt_at(src, anchor, after=0):
+    """The whole statement from `anchor` through the matching close brace, CONDITION INCLUDED.
+
+    block_at() starts at the first `{`, which is the wrong place to start when what is being
+    checked lives in the condition -- an `if` whose condition carries the only interesting text
+    has a body that says nothing at all. Two hand-patched slices failed here before stmt_at
+    existed, in the same way and for the same reason:
+
+        block_at(...)                        body only; the condition is invisible
+        src[anchor : anchor + len(block)]    a FIXED-WIDTH window, sized in the clean file
+
+    The second is the trap. len(block) is the body's length, so the window stays exactly as
+    wide as the body however far back its start is moved. Reaching back over a 119-character
+    condition buys 119 characters of room, and a mutation that lengthens the condition to 167
+    puts the token 36 characters past the end of the region being read. Both versions returned
+    the same 131 characters and the check went green on a file that had changed.
+
+    Taking the end from the brace's own index instead -- anchor .. brace + len(block) -- makes
+    the region grow with the construct, which is the only reading of "this statement" that
+    survives the statement being changed.
+
+    Returns "" when the anchor is absent or unbalanced, like block_at().
+    """
+    if isinstance(anchor, str):
+        anchor = src.find(anchor)
+        if anchor < 0:
+            return ""
+    j = src.find("{", anchor + after)
+    if j < 0:
+        return ""
+    blk = block_at(src, j)
+    return src[anchor:j + len(blk)] if blk else ""
+
+
 def fn_body(src, name):
     """Return the body text of a function definition, brace-matched.
 
@@ -1201,13 +1332,27 @@ if not pt_poll:
     m3_fail.append("pollPads_M3() not found in pads_m3.ino")
     print("  [FAIL] pollPads_M3() not found")
 else:
+    # Split the two halves of the scan first, and do it with the markers this file writes
+    # rather than with rindex(). The long-press poll at the end also contains "continue"-free
+    # code but is a separate pass, and a search from the wrong end silently measures the
+    # wrong one -- which is how the Phase 1 release-ordering test ended up inverted once
+    # already (see the comment below).
+    _press = pt_poll[:pt_poll.find("---- RELEASE ----")] if "---- RELEASE ----" in pt_poll else ""
+    _rel   = pt_poll[pt_poll.find("---- RELEASE ----"):] if "---- RELEASE ----" in pt_poll else ""
+
+    # Read the press branch as a REGION, not as a regex over its text. The previous version
+    # demanded `else if (g_fxAssignMode) { doFXAssign_M3(i); }` with no guard -- which is the
+    # BUG, and which V5's own line does not contain. Built by transcribing the port's text
+    # rather than the rule it implements, and it printed PASS while the thing it named was
+    # broken: the label and the assertion disagreed, and the assertion is the one that runs.
+    _fxpress = block_at(_press, "else if (g_fxAssignMode)")
     for label, ok in [
         ("chord checked BEFORE the fxAssignMode press branch",
-         pt_poll.index("CHORD_WINDOW_MS") < pt_poll.index("doFXAssign_M3(i)")),
-        ("releasing a chord member is ignored, not read as a tap",
-         re.search(r"if\s*\(\s*pChord_arr\[i\]\s*\)\s*\{[^}]*continue", pt_poll) is not None),
-        ("FX-assign press branch covers every pad that is not a chord",
-         re.search(r"if\s*\(\s*g_fxAssignMode\s*\)\s*\{\s*doFXAssign_M3\(i\);", pt_poll) is not None),
+         _press.index("CHORD_WINDOW_MS") < _press.index("doFXAssign_M3(i)")
+         if _press and "CHORD_WINDOW_MS" in _press and "doFXAssign_M3(i)" in _press else False),
+        ("FX-assign press branch covers every pad that is not a chord (V5 :5749)",
+         bool(_fxpress) and "doFXAssign_M3(i)" in _fxpress
+         and re.search(r"i\s*!=\s*PAD_FUNC_A\s*&&\s*i\s*!=\s*PAD_FUNC_B", _fxpress) is not None),
     ]:
         if ok:
             print("  [PASS] %s" % label)
@@ -1215,20 +1360,77 @@ else:
             m3_fail.append(label)
             print("  [FAIL] %s" % label)
 
-    # The release half. Located by its own comment rather than by rindex(), because
-    # rindex("continue") over the whole function finds the chord branch's -- which sits
-    # ABOVE the release code, so the ordering test inverted and reported a FAIL on code
-    # that behaves correctly. Slice from the release marker down instead.
-    _rel = pt_poll[pt_poll.find("---- RELEASE ----"):] if "---- RELEASE ----" in pt_poll else ""
+    # Releasing a chord member must not read as a tap. Brace-matched rather than regexed:
+    # see block_at()'s note for what a `[^}]*` here cost when the block grew an if/else.
+    _chord_rel = block_at(_rel, "if (pChord_arr[i])") if "if (pChord_arr[i])" in _rel else ""
+    # Whitespace-normalised before the endswith test: block_at() returns the block with its
+    # own closing brace and the indentation in front of it, so a literal "continue;}" would
+    # fail on a correct block for the sake of a newline.
+    _chord_tail = re.sub(r"\s+", "", _chord_rel[-40:]) if _chord_rel else ""
+    for label, ok in [
+        ("chord-member release block located", bool(_chord_rel)),
+        ("releasing a chord member is ignored, not read as a tap",
+         bool(_chord_rel) and _chord_tail.endswith("continue;}")),
+        ("chord-member release clears ONLY its own flag, not its partner's",
+         bool(_chord_rel) and re.search(r"pChord_arr\[i\]\s*=\s*false", _chord_rel) is not None
+         and re.search(r"pChord_arr\[(PAD_PLAY_A|PAD_PLAY_B|i)\]\s*=\s*false", _chord_rel) is not None),
+    ]:
+        if ok:
+            print("  [PASS] %s" % label)
+        else:
+            m3_fail.append(label)
+            print("  [FAIL] %s" % label)
+
+    # ── The FUNC chord's three arms. Phase 1 asserted the chord WINDOW and the press/release
+    # ORDERING and never this, which is how Phase 1 shipped a middle arm that V5 does not
+    # have: it made "FUNC then FUNC" enter FX assign, while V5 :5737-5739 closes FUNC mode and
+    # V5 enters FX assign by SELECTING the FX page. The defect was invisible to this suite
+    # because the suite never asked the question. These checks are here so it cannot recur.
+    chord_fn = fn_body(pad_src, "static void funcChord_M3(")
+    for label, ok in [
+        ("the FUNC chord's arms are in one function, not inline in the scan",
+         bool(chord_fn)),
+        ("arm 1: inside FX assign, the chord EXITS it",
+         bool(chord_fn) and
+         re.search(r"if\s*\(\s*g_fxAssignMode\s*\)\s*\{[^}]*g_fxAssignMode\s*=\s*false",
+                   chord_fn) is not None),
+        ("arm 2: inside FUNC mode, the chord CLOSES it (V5 :5737-5739) -- "
+         "it does NOT enter FX assign",
+         bool(chord_fn) and
+         re.search(r"else if\s*\(\s*g_funcMode\s*\)\s*\{[^}]*g_funcMode\s*=\s*false",
+                   chord_fn) is not None and
+         not re.search(r"else if\s*\(\s*g_funcMode\s*\)\s*\{[^}]*g_fxAssignMode\s*=\s*true",
+                       chord_fn)),
+        ("arm 3: from cold, the chord OPENS plain FUNC mode",
+         bool(chord_fn) and
+         re.search(r"else\s*\{[^}]*g_funcMode\s*=\s*true", chord_fn) is not None),
+    ]:
+        if ok:
+            print("  [PASS] %s" % label)
+        else:
+            m3_fail.append(label)
+            print("  [FAIL] %s" % label)
+
+    # ── The release dispatch, in V5's order.
+    #
+    # Phase 1 asserted "releasing a FUNC pad leaves FX assign", which is not V5's behaviour
+    # either: V5 :5984-5986 calls doFXAssign(i), so pads 7 and 8 get to carry an effect like
+    # any other step, and the chord is the only way out. The assertion below is the corrected
+    # one -- it checks what the release path actually does, which is that a solo FUNC-pad
+    # release reaches doFXAssign and that nothing on that path clears the mode.
+    _fx_rel = block_at(_rel, "if (g_fxAssignMode)")
     for label, ok in [
         ("release section located", bool(_rel)),
-        ("FUNC release exits FX-assign",
-         re.search(r"i == PAD_FUNC_A \|\| i == PAD_FUNC_B", _rel) is not None),
-        ("non-FUNC release does NOT exit -- the exit is inside the FUNC test",
-         bool(_rel) and
-         "g_fxAssignMode = false" in _rel and
-         re.search(r"if\s*\(\s*i == PAD_FUNC_A \|\| i == PAD_FUNC_B\s*\)\s*\{[^}]*"
-                   r"g_fxAssignMode = false", _rel) is not None),
+        ("FX-assign release branch calls doFXAssign for a FUNC pad, and ONLY for one (V5 :5984-5986)",
+         bool(_fx_rel) and "doFXAssign_M3(i)" in _fx_rel
+         and re.search(r"i\s*==\s*PAD_FUNC_A\s*\|\|\s*i\s*==\s*PAD_FUNC_B", _fx_rel) is not None),
+        # Regex, not a literal with one space: the firmware writes `g_fxAssignMode  = false`
+        # with two in the chord handler, and a literal lookup for the one-space form would be
+        # absent from BOTH files -- true for the wrong reason twice over.
+        ("a solo FUNC-pad release does NOT clear the mode -- that is the chord's job",
+         bool(_fx_rel)
+         and re.search(r"g_fxAssignMode\s*=\s*false", _fx_rel) is None
+         and re.search(r"g_fxAssignMode\s*=\s*false", pad_src) is not None),
     ]:
         if ok:
             print("  [PASS] %s" % label)
@@ -1329,8 +1531,13 @@ print("      are modelled from V5's shape, not measured on a bouncing switch.")
 print("    - that the gesture feels like V5's. Sequencing FX onto a step is only reachable")
 print("      by the two-stage pad gesture, and whether that is discoverable is a question")
 print("      for a person holding the device.")
-print("    - PLAY/STOP, the FUNC pages (tempo/preset/order/len) and the ch2 generator are")
-print("      not in this file. This is FX-assign only.")
+print("    - PLAY/STOP, the FUNC pages and step editing were NOT in this file when this")
+print("      section was written -- they are M3 Phase 3, checked in the section below. Two")
+print("      of the checks above were rewritten by that work rather than deleted: the FUNC")
+print("      chord's middle arm and the FUNC-pad release both asserted behaviour V5 does")
+print("      not have. See the note on the release dispatch below.")
+print("    - that the long-press threshold feels right. 500 ms is V5's, not measured on a")
+print("      human thumb, and it now gates three different outcomes.")
 
 # ===================================================================== M3 Phase 2: ch2 pitch mode
 #
@@ -1663,6 +1870,576 @@ print("    - that mode 1 sounds right. Same, and it cannot be checked by ear eit
 print("      control surface exists.")
 print("    - anything about V5's other six modes. They are not ported, and sequencer.h says")
 print("      which infrastructure each one is missing.")
+
+# ===================================================================== M3 Phase 3: the gesture layer
+#
+# PLAY/STOP, the FUNC pages, step editing and the boot handoff. The discipline is Phase 1's
+# and Phase 2's: parse V5 and the port side by side, read the wiring out of the shipped
+# source, and end with the numbers the hardware is expected to print.
+#
+# This section is also where two of Phase 1's own checks got rewritten, which is worth a
+# sentence at the top because it is the third time in this project a green check has turned
+# out to have been asserting the wrong thing. Phase 1 asserted "releasing a FUNC pad leaves
+# FX assign" and "FUNC then FUNC enters FX assign". Neither is V5's behaviour -- V5 :5984-5986
+# routes that release to doFXAssign, so pads 7 and 8 can carry an effect, and V5 enters FX
+# assign by selecting the FX page (:3427-3431) while its second FUNC press CLOSES FUNC mode
+# (:5737-5739). Both checks were reading the Phase 1 commit message as if it were V5.
+#
+# The lesson generalises to a rule this section follows: every check names the V5 line it is
+# comparing against, and a check that cannot name one is not a port check.
+print()
+print("=" * 78)
+print("M3 Phase 3: PLAY/STOP + FUNC pages + step editing -- V5 lines vs port lines")
+print("=" * 78)
+
+p3_fail = []
+
+
+def p3(label, ok, detail=""):
+    if ok:
+        print("  [PASS] %s%s" % (label, ("   " + detail) if detail else ""))
+    else:
+        p3_fail.append(label)
+        print("  [FAIL] %s%s" % (label, ("   " + detail) if detail else ""))
+
+
+print()
+print("  PLAY/STOP: pads, threshold, and where it fires")
+print("  " + "-" * 74)
+
+# V5 :1333 -- #define LG 500. Compared to the port's LONG_PRESS_MS, as numbers.
+v5_lg = re.search(r"#define\s+LG\s+(\d+)", v5_src)
+port_lg = re.search(r"#define\s+LONG_PRESS_MS\s+(\d+)", cfg_src)
+p3("LONG_PRESS_MS is V5's LG", bool(v5_lg) and bool(port_lg)
+   and v5_lg.group(1) == port_lg.group(1),
+   "V5 %s, port %s" % (v5_lg.group(1) if v5_lg else None,
+                       port_lg.group(1) if port_lg else None))
+
+# stmt_at, not block_at. This chord's whole point is that its CONDITION tests only that the
+# other pad is down -- V5 :5651-5652 -- and block_at() cannot see a condition at all. Two
+# hand-patched slices failed here before stmt_at existed; the reason is in its docstring and is
+# worth more than the fix, because it is a general way to write a check that looks structural
+# and is not.
+_chord_play = stmt_at(pad_src, "if ((i == PAD_PLAY_A && pState_arr[PAD_PLAY_B])")
+p3("the PLAY chord arms on PRESS, not on release (V5 :5650-5654)", bool(_chord_play))
+p3("and it carries NO time window, unlike the FUNC chord",
+   absent_in(_chord_play, "CHORD_WINDOW_MS", cfg_src),
+   "V5 :5651-5652 tests only that the other pad is down -- and CHORD_WINDOW_MS is proven to "
+   "exist, so its absence here is a fact about this block and not a typo")
+p3("...and the region checked INCLUDES the condition, not just the block body",
+   bool(_chord_play) and "pState_arr[PAD_PLAY_B]" in _chord_play
+   and _chord_play.index("pState_arr[PAD_PLAY_B]") < _chord_play.index("{"),
+   "a brace-only slice cannot see anything standing in front of its own brace")
+
+_chord_blk = block_at(pad_src, "if (pChord_arr[i])")
+# The one-toggle-per-gesture property. It rests on two things together: the gate is the
+# CONJUNCTION of both flags, and the block clears only its own. Break either and pressing
+# 1+2 toggles twice -- once per finger -- which is the kind of bug that sounds like the
+# transport is unreliable rather than like a logic error.
+p3("PLAY fires from the chord-release block, not from the FX/FUNC release arms",
+   "PAD_PLAY_A" in _chord_blk and "seq_toggle()" in _chord_blk)
+p3("PLAY's gate is the CONJUNCTION of both chord flags",
+   re.search(r"pChord_arr\[PAD_PLAY_A\]\s*&&\s*pChord_arr\[PAD_PLAY_B\]", _chord_blk) is not None)
+# Compare the LIST of assigned indices against ["i"]. Counting `= false` is the obvious
+# version and it is wrong: clearing both flags in one chained assignment --
+# pChord_arr[PAD_PLAY_A] = pChord_arr[PAD_PLAY_B] = false; -- contains exactly one
+# `= false`, so the count stayed 1 and mutation 2 survived. It survives because that mutation
+# is behaviourally harmless (the partner's flag is already spent), which is the whole problem:
+# a count watches the symptom, and here the symptom never moved. The rule is "only index i
+# is ever written", so that is what gets asserted.
+_p4_assigned = re.findall(r"pChord_arr\[\s*([A-Za-z_0-9]+)\s*\]\s*=(?!=)", _chord_blk)
+p3("the release block clears only pChord_arr[i] -- that is what stops a double toggle",
+   _p4_assigned == ["i"], "writes to pChord_arr%s" % (_p4_assigned or "(nothing)"))
+
+# holdMs measured from max(), not min(). V5 :5871. From the earlier press, a two-finger
+# press reads as longer than it was -- so a deliberate 500 ms factory-reset hold becomes a
+# hold the user has to make longer than V5's threshold to reach at all.
+_maxp = re.search(r"pDown_arr\[PAD_PLAY_A\]\s*>\s*pDown_arr\[PAD_PLAY_B\]", _chord_blk)
+p3("holdMs is measured from the LATER of the two presses (V5 :5871 max(), not min())",
+   _maxp is not None)
+
+_long_blk = block_at(_chord_blk, "if (holdMs >=") if "if (holdMs >=" in _chord_blk else ""
+p3("a short PLAY press toggles, a long one factory-resets (V5 :5872/5935)",
+   "seq_factoryReset()" in _long_blk and "seq_toggle()" in _chord_blk
+   and _long_blk.find("seq_factoryReset()") < _chord_blk.find("seq_toggle()"),
+   "long branch tested first")
+
+print()
+print("  the factory reset: V5 :5880-5904 field by field")
+print("  " + "-" * 74)
+
+_fr = fn_body(seq_src, "void seq_factoryReset(")
+p3("seq_factoryReset() found", bool(_fr))
+
+# V5's reset, read straight out of its source rather than transcribed, so the comparison
+# below cannot be a comparison of this file's own beliefs.
+_v5_fr = ""
+if "seq.steps[s].effect = 0" in v5_src:
+    _i = v5_src.index("defNote[16]")
+    _v5_fr = v5_src[_i:_i + 1400]
+
+# The four things V5 sets that have a direct counterpart here, each asserted on both sides.
+for label, v5_pat, port_pat, why in [
+    ("tempo 120", r"seq\.tempo\s*=\s*120", r"seq_setTempo\(120\)",
+     "V5 :5890"),
+    ("length 16", r"seq\.len\s*=\s*16", r"seq_loadPreset\(0\)",
+     "V5 :5890; the port gets len 16 from the preset load, not from a literal"),
+    ("portamento speed 4", r"gPortaSpeed\s*=\s*4", r"seq_setPortaSpeed\(4\)",
+     "V5 :5900"),
+    ("step order forward", r"rrMode\s*=\s*0", r"seq_setOrder\(SEQ_ORDER_FORWARD\)",
+     "V5 :5901"),
+    ("every step's effect cleared", r"seq\.steps\[s\]\.effect\s*=\s*0",
+     r"seq_loadPreset\(0\)", "V5 :5888; the port's preset 0 has an all-zero effect column"),
+]:
+    p3("V5 resets %s and so does the port -- %s" % (label, why),
+       bool(_fr) and re.search(v5_pat, _v5_fr) is not None
+       and re.search(port_pat, _fr) is not None)
+
+# The property that makes the reset a reset and not a mute: V5's own comment says the
+# sequencer keeps running, and a reset that also stopped the clock would be indistinguishable
+# from pressing STOP -- with the pattern gone as well, which is worse.
+_fr_code = strip_comments(_fr)
+p3("the reset does NOT stop the sequencer (V5 :5879 'sequencer keeps running')",
+   absent_in(_fr_code, "seq_stop", seq_src)
+   and absent_in(_fr_code, "seq_toggle", seq_src)
+   and absent_in(_fr_code, "seq.running", seq_src),
+   "read with comments stripped -- the body NAMES seq_stop() while explaining why it "
+   "does not call it")
+
+# V5 also closes every menu on reset (:5902-5903). In V5 that is inside the same function;
+# here seq_factoryReset() lives in the sequencer, which must not know what a pad menu is, so
+# the mode closes live in the pad handler. Asserted in the pad file rather than here.
+p3("the pad handler closes the menus after a reset",
+   "g_funcMode = false" in _chord_blk and "g_fxAssignMode  = false" in _chord_blk)
+
+print()
+print("  the FUNC pages: V5's numbers kept, V5's gaps kept")
+print("  " + "-" * 74)
+
+# V5 :1135 -- FUNCNAMES[8] = {"KEY","RIFF","SOUND","WALK","FX","TEMPO","PLEN","PAT>"}
+v5_fnames = re.search(r"FUNCNAMES\s*\[\s*\]\s*=\s*\{([^}]*)\}", v5_src)
+v5_names = re.findall(r'"([^"]*)"', v5_fnames.group(1)) if v5_fnames else []
+
+_port_fnames = re.search(r"G_FUNC_NAME\s*\[[^\]]*\]\s*=\s*\{([^}]*)\}", pad_src)
+port_names = re.findall(r'"([^"]*)"', _port_fnames.group(1)) if _port_fnames else []
+
+p3("V5's FUNCNAMES read out of :1135", len(v5_names) == 8, str(v5_names))
+p3("the port's page table is the same LENGTH, so the two compare element by element",
+   len(port_names) == len(v5_names) == 8, "port %s" % port_names)
+
+# The whole point of keeping V5's numbering: the four pages the port implements that also
+# exist in V5 must sit at the SAME index. A compacted 5-entry table would compare unequal
+# everywhere and say nothing, which is why this is asserted index by index.
+_same = [i for i in range(8) if v5_names[i] == port_names[i]]
+p3("the pages that exist in both are at the SAME index as V5",
+   _same == [1, 4, 5, 6, 7], "agreeing at %s" % _same)
+for i in _same:
+    if i != 4:
+        p3("  slot %d is %r in both" % (i, v5_names[i]), True)
+p3("slot 2 is the one rename: V5 'SOUND', port 'CH2'",
+   v5_names[2] == "SOUND" and port_names[2] == "CH2",
+   "the port has one engine, so SOUND has nothing to select")
+
+# The table comparison above is about NAMES. It says nothing about the page CONSTANTS, and
+# those are what the dispatch actually switches on -- so mutation 13 moved G_FUNC_TEMPO from
+# 5 to 3, left every name in place, and the whole name comparison stayed green while the
+# firmware would have dispatched TEMPO on the WALK page. Compare the constants to V5's own
+# enum, read from V5's source, rather than to a transcription of it.
+#
+# V5 :1116-1117 -- `FUNC_NONE=-1,` then `FUNC_KEY=0, FUNC_PAT, FUNC_SOUND, ...`, so the
+# values are implied by the declaration order and have to be enumerated.
+_v5_enum_line = re.search(r"FUNC_KEY\s*=\s*0\s*,(.*)", v5_src)
+# FUNC_KEY is consumed by the anchor and is pinned at 0 by it, so the names that follow start
+# at 1. Getting this off by one is silent and nasty: every index comes out one too low, so
+# the port's correct constants all appear to be wrong.
+_v5_seq = ["FUNC_KEY"]
+if _v5_enum_line:
+    for _tok in _v5_enum_line.group(1).replace(";", ",").split(","):
+        _tok = re.sub(r"[^A-Za-z0-9_].*$", "", _tok.strip())
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", _tok):
+            _v5_seq.append(_tok)
+_v5_idx = dict((nm, i) for i, nm in enumerate(_v5_seq))
+p3("V5's FuncSel enum enumerates to 8 pages, read out of :1117",
+   _v5_seq == ["FUNC_KEY", "FUNC_PAT", "FUNC_SOUND", "FUNC_WALK",
+               "FUNC_FX", "FUNC_TEMPO", "FUNC_PLEN", "FUNC_PATMODE"],
+   str(_v5_seq))
+
+_port_defs = dict((m.group(1), int(m.group(2))) for m in
+                 re.finditer(r"#define\s+G_FUNC_([A-Z0-9_]+)\s+(\d+)\b", pad_src))
+# Which V5 slot each port constant stands for. Explicit, because the names differ on purpose:
+# CH2 is V5's SOUND slot, and ORDER is V5's PATMODE slot.
+_PORT_SLOT_IS_V5 = {"KEY": "FUNC_KEY", "PAT": "FUNC_PAT", "CH2": "FUNC_SOUND",
+                    "WALK": "FUNC_WALK", "FX": "FUNC_FX", "TEMPO": "FUNC_TEMPO",
+                    "PLEN": "FUNC_PLEN", "ORDER": "FUNC_PATMODE"}
+p3("the port defines one constant per page, eight of them",
+   sorted(_port_defs) == sorted(_PORT_SLOT_IS_V5), str(sorted(_port_defs)))
+_p13_wrong = dict((k, (_port_defs[k], _v5_idx.get(_PORT_SLOT_IS_V5[k])))
+                  for k in _PORT_SLOT_IS_V5
+                  if k in _port_defs and _v5_idx.get(_PORT_SLOT_IS_V5[k]) is not None
+                  and _port_defs[k] != _v5_idx[_PORT_SLOT_IS_V5[k]])
+p3("every page constant sits at V5's index for the same page",
+   not _p13_wrong,
+   "the dispatch switches on these, not on the table above: %s" % (_p13_wrong or "all 8 agree"))
+p3("the eight constants are distinct and cover 0-7, so no page shadows another",
+   sorted(_port_defs.values()) == list(range(8)),
+   "G_FUNC_TEMPO 3 would collide with G_FUNC_WALK 3, which is how mutation 13 shows up here")
+p3("the two unimplemented pages are marked dead, not renamed into something",
+   port_names[0] == "-" and port_names[3] == "-",
+   "slot 0 KEY and slot 3 WALK")
+
+# The implemented set, as a mask read from the source, must be exactly the pages with an arm
+# in doFuncApply_M3 -- plus FX, which is implemented by doFuncSelect's side effect rather than
+# by an apply arm. Assert the mask and the arms agree, so adding a page to one and not the
+# other is a failure.
+_m = re.search(r"#define\s+G_FUNC_IMPL\s+(.*?)(?:\n\s*\n|\Z)", pad_src, re.S)
+impl_bits = set()
+if _m:
+    for nm in re.findall(r"G_FUNC_(\w+)\s*\)", _m.group(1)):
+        d = re.search(r"#define\s+G_FUNC_%s\s+(\d+)" % nm, pad_src)
+        if d:
+            impl_bits.add(int(d.group(1)))
+_apply = fn_body(pad_src, "static void doFuncApply_M3(")
+_arms = set(int(x) for x in re.findall(r"case G_FUNC_(\w+):", _apply)
+            for x in [re.search(r"#define\s+G_FUNC_%s\s+(\d+)" % x, pad_src).group(1)])
+p3("G_FUNC_IMPL lists exactly the pages that have an apply arm, plus FX",
+   impl_bits == _arms | {4}, "IMPL %s, arms %s, +FX" % (sorted(impl_bits), sorted(_arms)))
+
+# TEMPO_PRESETS, V5 :1171 -- the tempo page's values have to be V5's or the page is a
+# different instrument.
+_v5_tempo = re.search(r"TEMPO_PRESETS\s*\[\s*\d+\s*\]\s*=\s*\{([^}]*)\}", v5_src)
+v5_tempo = [int(x) for x in re.findall(r"\d+", _v5_tempo.group(1))] if _v5_tempo else []
+_p_tempo = re.search(r"G_TEMPO_PRESETS\s*\[\s*\d+\s*\]\s*=\s*\{([^}]*)\}", pad_src)
+port_tempo = [int(x) for x in re.findall(r"\d+", _p_tempo.group(1))] if _p_tempo else []
+p3("TEMPO_PRESETS is V5's, value for value", port_tempo == v5_tempo == [100, 110, 120, 128, 133, 138, 145, 160],
+   str(port_tempo))
+
+print()
+print("  doFuncSelect / doFuncApply: each arm reaches the right sequencer call")
+print("  " + "-" * 74)
+
+_sel = fn_body(pad_src, "static void doFuncSelect_M3(")
+for label, needle, v5line in [
+    ("preset page loads a preset", "seq_loadPreset(slot)", ":3570-3572"),
+    ("ch2 page sets the pitch mode", "seq_setCh2Mode(slot)", "the port's own page; V5's slot 2 is SOUND"),
+    ("tempo page sets the tempo", "seq_setTempo(G_TEMPO_PRESETS[slot])", ":3603"),
+    ("order page sets the step order", "seq_setOrder(slot)", ":3599"),
+]:
+    blk = block_at(_apply, "case G_FUNC_") if _apply else ""
+    p3("%s -- %s" % (label, v5line), bool(blk) and needle in _apply)
+
+# The FX page's side effect is the load-bearing part of doFuncSelect: it is what makes
+# selecting FX leave FUNC mode, which in turn is why the FUNC chord afterwards CLOSES FX
+# assign rather than reopening FUNC. If the funcMode=false were dropped, the two modes would
+# both be true and the chord would take the wrong arm.
+p3("selecting the FX page opens FX assign AND closes FUNC mode (V5 :3427-3431)",
+   bool(_sel) and re.search(r"g_fxAssignMode\s*=\s*true", _sel) is not None
+   and re.search(r"g_funcMode\s*=\s*false", _sel) is not None)
+p3("a dead page clears the selection and says so, rather than selecting nothing silently",
+   bool(_sel) and "is not implemented" in _sel
+   and re.search(r"g_funcSel\s*=\s*G_FUNC_NONE", _sel) is not None)
+p3("selecting any page leaves FX assign (V5 :3423-3424)",
+   bool(_sel) and re.search(r"g_fxAssignMode\s*=\s*false", _sel) is not None)
+
+print()
+print("  FUNC dispatch: bottom row selects, top row applies, PLEN takes the tap")
+print("  " + "-" * 74)
+
+# PLEN is the page where the select/apply shape does not hold, and it is the easiest thing
+# to lose in a port because "bottom row selects, top row applies" is the rule everywhere else.
+# V5 :5836-5854 uses the tap itself as the length, 9-16 on the bottom row and 1-8 on the top.
+_press_m3 = block_at(pad_src, "void pollPads_M3(", 0)
+_press_m3 = _press_m3[:_press_m3.find("---- RELEASE ----")] if "---- RELEASE ----" in _press_m3 else ""
+# Literal source text, not a regex. An earlier draft of this check spelled the arithmetic out
+# as a pattern with unescaped parentheses and took the whole suite down with a re.error. A
+# crash is at least loud, but this check should not need a regex to confirm the port wrote a
+# particular expression -- and a pattern puts the expected value in a second place.
+p3("PLEN: bottom-row press sets length 9-16 (V5 :5836-5840)",
+   "seq_setLen((uint8_t)((i - 8) + 9))" in _press_m3,
+   "the tap is the value, not a slot")
+p3("PLEN: top-row press sets length 1-8 (V5 :5848-5854)",
+   "seq_setLen((uint8_t)(i + 1))" in _press_m3)
+p3("PLEN is checked on BOTH rows -- select-then-apply does not apply to it",
+   len(re.findall(r"g_funcSel == G_FUNC_PLEN", _press_m3)) == 2)
+p3("pads 1/2 and 7/8 do nothing on press inside FUNC mode (V5 :5831-5834, deferred)",
+   re.search(r"i == PAD_FUNC_A \|\| i == PAD_FUNC_B \|\|\s*\n\s*i == PAD_PLAY_A"
+             r" \|\| i == PAD_PLAY_B", _press_m3) is not None)
+
+# Two modes, eight pads. V5's idiom is constrain(slot,0,7) on a field that has 8 values
+# (:3603 and friends); applied to a 2-value field it means six of the eight top-row pads do
+# the same thing as two of them. That is the port's documented clamp, not a rejection, and
+# the CH2 log prints the mode the sequencer ENDED UP holding rather than the slot asked for
+# -- so the clamp is visible instead of surprising. Asserted because the alternative (ignore
+# the tap) is what a reader would assume, and the two behave identically in every test
+# except the log line.
+_setch2 = fn_body(seq_src, "void seq_setCh2Mode(")
+p3("the CH2 page clamps the slot rather than ignoring the tap",
+   bool(_setch2) and "SEQ_CH2_MODE_COUNT" in _setch2 and "seqCh2Mode = " in _setch2)
+# Mutation 17 changed the MODE argument to `slot` and passed, because the old check asked
+# whether "seq_ch2Mode()" appears somewhere in the function -- and it does, in the NAME
+# argument, either way. Asserting that a name occurs inside a function says almost nothing
+# about which argument it occupies. Pin the argument order instead: slot+1 for the pad, then
+# the mode read back, then the mode's name.
+p3("...and the log prints the resulting mode, not the slot that was asked for",
+   re.search(r"mode\s+%u\s+%s\\r\\n\"" r",\s*\(unsigned\)\s*\(slot\s*\+\s*1\)\s*,\s*"
+             r"\(unsigned\)\s*seq_ch2Mode\(\)\s*,\s*"
+             r"seq_ch2ModeName\s*\(\s*seq_ch2Mode\(\)\s*\)\s*\)\s*;",
+             _apply) is not None,
+   "slots 3-8 visibly collapse to mode 0")
+
+print()
+print("  step editing: on release, never on press")
+print("  " + "-" * 74)
+
+_rel_m3 = pad_src[pad_src.find("---- RELEASE ----"):] if "---- RELEASE ----" in pad_src else ""
+p3("normal mode's release arm calls the step toggle",
+   "doPadRelease_M3(i)" in _rel_m3)
+# The presence half above is not the rule. The rule is that the step toggles ONCE, on release.
+# Adding a second toggle to the press path satisfies the presence check perfectly, which is
+# what mutation 19 did. The absence is the half that carries the meaning.
+p3("...and the PRESS path does not, so one tap is one edit (V5 :5712-5719)",
+   bool(_press_m3) and absent_in(_press_m3, "seq_toggleStep", pad_src),
+   "presence in the release arm was already asserted; this is the half that can fail")
+_rel_fn = fn_body(pad_src, "static void doPadRelease_M3(")
+p3("the toggle goes through seq_toggleStep(), not a direct field write",
+   bool(_rel_fn) and "seq_toggleStep" in _rel_fn and "steps[" not in _rel_fn)
+p3("pads_m3.ino never writes seq.steps[] at all -- the sequencer keeps one writer",
+   "seq.steps[" not in pad_src and "seq.steps[" not in box_src)
+
+_long_fn = fn_body(pad_src, "static void doPadLong_M3(")
+p3("long press alternates accent and glide by a PER-PAD cycle (V5 :2985-2987)",
+   bool(_long_fn) and re.search(r"pCycle_arr\[pad\]\s*%\s*2\)\s*==\s*0", _long_fn) is not None
+   and "seq_setStepAccent" in _long_fn and "seq_setStepGlide" in _long_fn)
+p3("and the cycle counter advances after the choice, so the two strictly alternate",
+   bool(_long_fn) and re.search(r"pCycle_arr\[pad\]\s*\+\+\s*;", _long_fn) is not None)
+# The old form searched for "SetStepEffect". The port's setter is `seq_setStepEffect`, and
+# `seq_setStepEffect` contains "SetStepEffect" as a substring only by accident of the
+# capital S -- which it does not have. So the token appeared NOWHERE in the firmware, the
+# check was true forever, and it had been reporting a guarantee it never tested. Now the
+# token is the real one and must be found in the sequencer before it may be reported absent
+# from the pad handler.
+p3("the effect byte is NOT reachable from a long press (V5 :2982-2984)",
+   absent_in(_long_fn, "seq_setStepEffect", seq_src),
+   "seq_setStepEffect is proven to exist in sequencer.ino, so its absence here is a fact")
+p3("...and the sequencer really does own the only writer of that byte",
+   re.search(r"void\s+seq_setStepEffect\s*\(", seq_src) is not None
+   and "seq_setStepEffect" in pad_src,
+   "the pad handler calls the setter, it does not poke the field")
+
+# The long-press poll has to be a SEPARATE pass. A long press is the absence of an edge, so
+# inside an edge-triggered loop it can never fire no matter what the condition says.
+p3("the long-press poll is a second loop, after the edge loop",
+   pad_src.count("for (uint8_t i = 0; i < NUM_PADS; i++)") >= 2)
+_poll_tail = pad_src[pad_src.rfind("LONG-PRESS POLLS"):] if "LONG-PRESS POLLS" in pad_src else ""
+p3("it is gated on !pChord, !pLong and both modes being off (V5 :6197-6200)",
+   all(x in _poll_tail for x in ["!pChord_arr[i]", "!pLong_arr[i]",
+                                 "!g_funcMode", "!g_fxAssignMode"]))
+p3("a long press sets pLong, so the same hold cannot also register as a tap",
+   re.search(r"pLong_arr\[i\]\s*=\s*true", _poll_tail) is not None)
+p3("and pLong is cleared on every press",
+   bool(_press_m3) and re.search(r"pLong_arr\[i\]\s*=\s*false", _press_m3) is not None)
+
+print()
+print("  the boot handoff")
+print("  " + "-" * 74)
+# The switch stays ON and its justification changed. Assert both the decision and the reason,
+# because a reader who finds #define SEQUENCER_PLAY_ON_START still there and no note about it
+# will reasonably assume the handoff was forgotten.
+_on = re.search(r"^#define\s+SEQUENCER_PLAY_ON_START\s*$", cfg_src, re.M)
+p3("SEQUENCER_PLAY_ON_START is still defined -- a silent boot is the worst thing to debug",
+   _on is not None)
+# The justification has to have CHANGED, not merely moved. Asserting the old phrase is
+# absent would be wrong: config.h quotes it as history on purpose, and a check that forbade
+# the words would push the next person to delete the history instead of updating the claim.
+# So: the old phrase must survive only as something marked superseded, and a new positive
+# reason must sit beside it.
+_cfg_note = cfg_src[max(0, _on.start() - 900):_on.start()] if _on else ""
+p3("the old justification is quoted and marked superseded, not left standing",
+   "no pad UI" in _cfg_note and "false as of M3 Phase 3" in _cfg_note)
+p3("and a NEW reason is given for keeping it on",
+   "look identical to a dead board" in _cfg_note,
+   "a silent boot is indistinguishable from a dead board, and PAD_PINS is a guess")
+p3("the two builds print different boot lines, so a log says which one produced it",
+   "[M3] boot: sequencer auto-started" in box_src and "[M3] boot: sequencer stopped" in box_src)
+
+print()
+print("  PREDICTION FOR HARDWARE -- what the log should read, per gesture")
+print("  " + "-" * 74)
+print("  Nothing below has been observed on a device. It is computed from the tables and the")
+print("  dispatch order above, and it is written down BEFORE the build so that it can fail.")
+print()
+
+# Every row's pad numbers are checked against the dispatch code above, not against V5's
+# layout by intuition: the bottom row is indices 8..15 = pads 9..16, and a bottom-row press
+# selects page (index - 8), so pad 9 -> KEY ... pad 16 -> PAT>, which is V5's FUNCNAMES order
+# exactly.
+#
+# The <was> -> <now> rows are written as arrows rather than as fixed strings on purpose: the
+# starting value comes out of the preset, and the suite has no way to know preset 0's accent
+# column. A prediction that hard-codes a value it cannot compute would be a guess wearing the
+# costume of a specification.
+pred = [
+    ("pads 1+2, short tap",
+     "[M3] play/stop pad 1: playing -> stopped",
+     "then [M2] seq stop after N steps",
+     "the pad number is whichever finger came up FIRST -- see the one-toggle note"),
+    ("pads 1+2, short tap again",
+     "[M3] play/stop pad 2: stopped -> playing",
+     "then [M2] seq start: 16 steps, 120 BPM",
+     "and pad 2, because the second finger is the one whose partner flag was cleared"),
+    ("pads 1+2, held 600 ms",
+     "[M3] factory reset: preset 0, 120 BPM, order 0, len 16, porta N ms, ch2 CHORD",
+     "still playing -- the reset does not stop the clock",
+     "600 ms only clears the 500 ms threshold; any longer hold works too"),
+    ("pads 7+8",
+     "[M3] func mode on -- pads 9-16 pick a page, pads 1-8 set it",
+     "",
+     "a second pads 7+8 prints [M3] func mode off"),
+    ("bottom pad 10 (index 9)",
+     "[M3] func page 1 RIFF",
+     "",
+     "9-8 = 1, and V5's slot 1 is RIFF"),
+    ("bottom pad 11 (index 10), then pad 2",
+     "[M3] func page 2 CH2",
+     "then [M3] ch2 pad 2 -> mode 1 OFF",
+     "this is the FIRST moment M3 Phase 2's mode is reachable at all. pad 2 is index 1"),
+    ("bottom pad 11 (index 10), then pad 3",
+     "[M3] ch2 pad 3 -> mode 0 CHORD",
+     "",
+     "the CLAMP, and the reason this row exists: slot 2 is >= SEQ_CH2_MODE_COUNT, so it "
+     "collapses to mode 0 rather than being ignored. Pads 3-8 all read CHORD"),
+    ("bottom pad 13 (index 12)",
+     "[M3] func page 4 FX -- pick an effect (pads 1-8), then a step",
+     "then [M3] fx select pad 3 -> Retrig",
+     "and then [M3] step 5 effect None -> Retrig. V5 enters FX by SELECTING the page"),
+    ("bottom pad 14 (index 13), then pad 3",
+     "[M3] func page 5 TEMPO",
+     "then [M3] tempo pad 3 -> 120 BPM (125000 us/step)",
+     "index 2 -> TEMPO_PRESETS[2] = 120, which is already the default, so nothing changes"),
+    ("bottom pad 15 (index 14), then pad 5",
+     "[M3] func page 6 PLEN",
+     "then [M3] length pad 5 -> 5 steps",
+     "PLEN takes the tap as the value; there is no separate apply step"),
+    ("bottom pad 16 (index 15), then pad 4",
+     "[M3] func page 7 PAT>",
+     "then [M3] order pad 4 -> 3",
+     "index 3 -> SEQ_ORDER_REVERSE; the pattern runs backwards from the next bar"),
+    ("bottom pad 9 or 12 (index 8 or 11)",
+     "[M3] func page 0 (-) is not implemented on this port",
+     "",
+     "KEY and WALK are holes. A dead page LOGS; a pad with no wire does not -- which is how "
+     "the two get told apart on the first hardware run"),
+    ("any pad, tapped alone",
+     "[M3] step 5 off -> on",
+     "",
+     "pad 6 is index 5, so it prints 'step 5'. Which arrow you get depends on preset 0"),
+    ("any pad, held 600 ms, 1st time",
+     "[M3] step 5 accent on -> off   (or off -> on)",
+     "then, held again: [M3] step 5 glide on -> off",
+     "accent and glide strictly alternate, per pad, forever -- V5 never resets the counter"),
+    ("pads 9-16, tapped alone",
+     "[M3] step 8 on -> off  ... through step 15",
+     "",
+     "the bottom row is steps 9-16 in normal mode and pages in FUNC mode"),
+    ("pads 7+8 while a page is open",
+     "[M3] func mode off",
+     "the page selection is discarded",
+     "and pads 7+8 while in FX assign print [M3] fx assign: off (chord)"),
+]
+for gesture, first, second, note in pred:
+    print("    %-28s %s" % (gesture, first))
+    if second:
+        print("    %-28s %s" % ("", second))
+    if note:
+        print("    %-28s (%s)" % ("", note))
+    print()
+
+# Read the firmware's DEBF literals back out and compare THOSE, not a transcription of them.
+# The previous version of this check compared rendered lines ("step 6 on -> off") against
+# source that only ever contains format strings ("step %u %s -> %s"), so it was guaranteed to
+# fail and told us nothing. Collecting the literals first means the expected set cannot drift
+# away from what the firmware actually prints.
+_P3_FMT = {}
+for _p3_f in (pad_src, seq_src, box_src):
+    for _p3_m in re.finditer(r'DEBF\(\s*"((?:[^"\\]|\\.)*)"', _p3_f):
+        _P3_FMT.setdefault(_p3_m.group(1), _p3_f)
+_p3_need = {
+    "play/stop":  "[M3] play/stop pad %u: %s -> %s\\r\\n",
+    "reset":      "[M3] factory reset: preset 0, %u BPM, order %u, len %u, porta %u ms, ch2 %s\\r\\n",
+    "func on":    "[M3] func mode on -- pads 9-16 pick a page, pads 1-8 set it\\r\\n",
+    "func off":   "[M3] func mode off\\r\\n",
+    "page":       "[M3] func page %u %s\\r\\n",
+    "page dead":  "[M3] func page %u (%s) is not implemented on this port\\r\\n",
+    "page fx":    "[M3] func page %u %s -- pick an effect (pads 1-8), then a step\\r\\n",
+    "preset":     "[M3] preset %u: len %u, tempo %u\\r\\n",
+    "ch2":        "[M3] ch2 pad %u -> mode %u %s\\r\\n",
+    "tempo":      "[M3] tempo pad %u -> %u BPM (%lu us/step)\\r\\n",
+    "length":     "[M3] length pad %u -> %u steps\\r\\n",
+    "order":      "[M3] order pad %u -> %u\\r\\n",
+    "step":       "[M3] step %u %s -> %s\\r\\n",
+    "accent":     "[M3] step %u accent %s -> %s\\r\\n",
+    "glide":      "[M3] step %u glide %s -> %s\\r\\n",
+    "fx select":  "[M3] fx select pad %u -> %s\\r\\n",
+    "fx off":     "[M3] fx assign: off (chord)\\r\\n",
+}
+_p3_missing = sorted(k for k, v in _p3_need.items() if v not in _P3_FMT)
+p3("every predicted line has a DEBF format the firmware actually contains",
+   not _p3_missing,
+   "missing: %s" % _p3_missing if _p3_missing
+   else "%d/%d formats found across pads_m3.ino, sequencer.ino and AcidBox.ino"
+        % (len(_p3_need), len(_P3_FMT)))
+
+# EVERY pad/step number in the log is 1-BASED, and that is not a style preference: the port
+# already defines it. The PLEN arms make pad N set length N -- pad 9 sets length 9, pad 16 sets
+# length 16 -- so pad N == step N with both running 1..16. Five log lines said so; four printed
+# the raw array index instead, so pressing pad 6 gave "[M3] play/stop pad 1" and then
+# "[M3] step 5" a few milliseconds later, two lines about one finger, one number apart.
+#
+# It matters because 6.6.2 separates "the pin table is wrong" from "the logic is wrong" by the
+# claim that a dead page TALKS and an unwired pad does NOT. That claim is only worth as much as
+# the log's numbers meaning what the pads mean, and the reader is a person holding a board with
+# no schematic.
+#
+# Derived from the firmware's own format strings rather than from a list written here, so a new
+# DEBF naming a pad is covered the day it is added instead of the day somebody remembers.
+_p3_offby = []
+_p3_counted = 0
+for _m3f in (pad_src, seq_src, box_src):
+    # `[^;]*?` is safe for a DEBF argument list: an expression cannot contain a top-level `;`,
+    # and this is what lets the check see arguments on the continuation lines at all.
+    for _m3d in re.finditer(r"DEBF\(([^;]*?)\);", _m3f, re.S):
+        _m3s = _m3d.group(1)
+        _m3fmt = re.search(r'"((?:[^"\\]|\\.)*)"', _m3s)
+        if not _m3fmt or not re.search(r"\b(?:pad|step)\s+%u", _m3fmt.group(1)):
+            continue
+        _p3_counted += 1
+        if not re.search(r"\(\s*unsigned\s*\)\s*\(\s*\w+\s*\+\s*1\s*\)", _m3s):
+            _p3_offby.append(re.sub(r"\s+", " ", _m3s[:76]))
+p3("every pad/step number in the log is 1-BASED, matching pad N == step N",
+   bool(_p3_counted) and not _p3_offby,
+   "0-based: %s" % _p3_offby if _p3_offby
+   else "%d statements naming a pad or a step, all +1" % _p3_counted)
+
+print()
+print("  " + "-" * 74)
+print("  M3 PHASE 3: %s" % ("ALL PASS" if not p3_fail else "*** %d FAIL ***" % len(p3_fail)))
+for f in p3_fail:
+    print("    FAILED: %s" % f)
+
+print()
+print("  Still NOT settled by anything above, stated so it is not over-read:")
+print("    - any of it. Nothing in this section has run on hardware. The predictions above")
+print("      are specifications written from the tables, and PAD_PINS is still a guess.")
+print("    - that the PLAY chord does not double-toggle. The check confirms the two code")
+print("      properties that make it true (conjunction gate, single-flag clear) and the")
+print("      prediction above says pad 1 then pad 2; the pair is a prediction about a")
+print("      sequence of real fingers, which only a person can produce.")
+print("    - that the factory reset is COMPLETE. It resets the sequencer's own state; it does")
+print("      not touch patch slots (M4), pot values, or any synth parameter, because in this")
+print("      port those live outside the sequencer and V5's filter-global clearing has no")
+print("      counterpart here.")
+print("    - that 500 ms is the right long-press threshold. It is V5's number, and it now")
+print("      gates three different outcomes: factory reset, accent/glide, and the note-edit")
+print("      engage that is not ported yet.")
 
 # ===================================================================== declaration / definition agreement
 #

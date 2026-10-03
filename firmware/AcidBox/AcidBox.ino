@@ -481,10 +481,25 @@ delay(200);
   // Starting any earlier means a step lands in a buffer nobody has silenced yet, which is
   // a click that gets blamed on the sequencer for the rest of time.
   //
-  // SEQUENCER_PLAY_ON_START is separate from SEQUENCER on purpose: keeping the sequencer
-  // compiled in but stopped is how M3 hands control to the pads without the device going
-  // silent in the meantime.
+  // M3 Phase 3: the justification in config.h used to be "there is no pad UI until M3, so
+  // this is the only way to hear it". That is no longer true -- pads 1+2 are PLAY/STOP as of
+  // this milestone -- and the switch is still on, for a better reason.
+  //
+  // PAD_PINS is a guess. Sixteen pins were re-picked for the S3's constraints without a
+  // schematic (pads_m3.ino has the full note), so the first hardware run of a build like
+  // this may well have no working pads at all. If the sequencer also waited for a pad press
+  // to start, that run would present as a completely dead device -- no sound, no log, no
+  // way to tell a pin-table mistake from a dead board. Starting the clock means the log
+  // fills in and the board is audibly alive whatever the pads turn out to be doing.
+  //
+  // So the switch stays and the reason changes from "there is nothing else" to "a silent
+  // boot is the worst possible failure mode to be debugging". Flipping it off is a
+  // one-token change and is the right call once the pad table has been confirmed against
+  // the schematic and by a run where every pad responds.
   seq_start();
+  DEBF("[M3] boot: sequencer auto-started (SEQUENCER_PLAY_ON_START); pads 1+2 are PLAY/STOP\r\n");
+#else
+  DEBF("[M3] boot: sequencer stopped; pads 1+2 start it\r\n");
 #endif
 
 #if ESP_ARDUINO_VERSION_MAJOR < 3 

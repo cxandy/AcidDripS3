@@ -231,6 +231,40 @@ void seq_start();
 void seq_stop();
 void seq_toggle();
 
+/* Is the clock running? Read back rather than inferred.
+ *
+ * Exists because "PLAY/STOP works" is otherwise only observable as the ABSENCE of two log
+ * lines, and an absence is the weakest kind of evidence there is: a firmware that never
+ * called seq_toggle() at all would print exactly the same log as one that called it and
+ * failed. One line with the answer in it is what makes the pad testable by somebody who
+ * is not listening to it.
+ */
+bool seq_running();
+
+/* Back to how the machine came up -- V5's PLAY-long-press, main sketch:5872-5904.
+ *
+ * Deliberately does NOT stop the sequencer, because V5's does not: the reset is "put the
+ * pattern and the settings back", and a user who holds PLAY for half a second while the
+ * thing is playing expects the next bar to be the default pattern, not silence.
+ *
+ * What it resets, and the two places it deliberately does not follow V5:
+ *
+ *   - notes / active / accent / glide / effect -> seq_loadPreset(0)
+ *   - tempo -> 120
+ *   - step order -> forward
+ *   - portamento speed -> 4 (V5's gPortaSpeed = 4, :5900)
+ *   - channel 2 pitch mode -> CHORD
+ *
+ *   - V5 also zeroes octave/scale/sound/trans/algo and clears its filter globals under
+ *     noInterrupts() (:5891-5899). None of those exist here: the port has one engine and no
+ *     global filter state to clear, and seq_loadPreset() already puts octave at 0. V5's
+ *     own default is octave 1, which is a different tuning convention rather than a step
+ *     this port skipped -- preset notes here are absolute, not C-relative.
+ *   - V5 clears kwMode and the walk generator's counters (:5896). The walk generator is M3
+ *     Phase 4 and does not exist yet.
+ */
+void seq_factoryReset();
+
 /* Load one of the SEQ_NUM_PRESETS built-in riffs. Clamped, not an error: a bad index
  * from a pad handler should not be able to walk off the table.
  */
@@ -362,6 +396,41 @@ void seq_driftReset();
  */
 void    seq_setStepEffect(uint8_t step, uint8_t fx);
 uint8_t seq_stepEffect(uint8_t step);
+
+/* Step on/off, accent and glide -- M3 Phase 3.
+ *
+ * These complete the set that seq_setStepEffect() started. Without them the eight pads are
+ * a transport and a parameter menu with no way to write a note, which is a sequencer you
+ * can listen to and not play.
+ *
+ * V5 writes seq.steps[p].active / .accent / .glide directly from doPadRelease() (:2967) and
+ * doPadLong() (:2985-2986). Here they go through setters, for the reason Phase 1 set the
+ * precedent with the effect byte: seq.steps[] then has exactly one writer, and a pad
+ * handler cannot disagree with the sequencer about what a step is.
+ *
+ * There is a setter AND a getter for each, not a toggle-only API. V5's doPadLong() needs to
+ * know the current value to alternate between accent and glide, and a toggle-only setter
+ * would make that alternation a property of how many times the pad was pressed rather than
+ * of what the step is -- which is a state that survives a preset load in the wrong way.
+ * The pad handler reads the value, decides, and writes.
+ *
+ * All clamped, all non-erroring: a pad index is not a place where a bad value can be
+ * allowed to reach an array.
+ */
+void    seq_setStepActive(uint8_t step, bool on);
+void    seq_toggleStep(uint8_t step);
+bool    seq_stepActive(uint8_t step);
+void    seq_setStepAccent(uint8_t step, bool on);
+bool    seq_stepAccent(uint8_t step);
+void    seq_setStepGlide(uint8_t step, bool on);
+bool    seq_stepGlide(uint8_t step);
+
+/* Read-backs for a UI or a log line. Same reason as seq_running(): the value the pad
+ * handler set and the value the sequencer holds are two facts, and only the second one is
+ * evidence. */
+uint16_t seq_tempo();
+uint8_t  seq_len();
+uint8_t  seq_order();
 
 /* Effect name, for a UI label or a diagnostic print. Never NULL; "?" for fx >= SEQ_NUM_FX.
  * V5 keeps the same eight strings in a UI table (main sketch:1128) and this is that table.

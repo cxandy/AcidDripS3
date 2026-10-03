@@ -55,9 +55,19 @@
 #define SEQ_FX_SELFTEST 0
 
 #define SEQUENCER               // the 16-step sequencer: M2, supersedes JUKEBOX
-#define SEQUENCER_PLAY_ON_START // start playing at boot. There is no pad UI until M3, so
-                               // this is the only way to hear it, and a sequencer nobody can
-                               // hear is not testable.
+
+/* Play at boot. Was justified as "there is no pad UI until M3, so this is the only way to
+ * hear it" -- true when written, false as of M3 Phase 3, which gave the pads PLAY/STOP.
+ *
+ * It stays on, for a different reason, and the reason is in AcidBox.ino next to seq_start():
+ * PAD_PINS is a guess (see the note above it), so a build that boots silent AND waits for a
+ * pad press would look identical to a dead board. Starting the clock keeps the log filling
+ * and the speakers moving no matter what the pads turn out to be doing.
+ *
+ * Turning this off is a one-token change and is correct once the pin table has been checked
+ * against the schematic AND by a hardware run in which all sixteen pads respond. Do not read
+ * the line above as "this should be off by now". */
+#define SEQUENCER_PLAY_ON_START
 #define MIDI_RAMPS              // this is what makes automated Cutoff-Reso-FX turn
 //#define TEST_POTS               // experimental interactivity with potentiometers connected to POT_PINS[] defined below
 
@@ -174,6 +184,16 @@ const uint8_t PAD_PINS[NUM_PADS] = {
  * V5's number rather than a fresh choice: the same two pads inside the same window has to
  * mean the same gesture, or the port's FUNC chord is not V5's FUNC chord. */
 #define CHORD_WINDOW_MS 200
+
+/* Long-press threshold, in ms. V5 spells it LG and gives it 500 (:1333), used in four
+ * places: the PLAY chord's factory reset (:5872), the normal accent/glide cycle (:6199), the
+ * note-edit engage window (:6208, 200 ms there and not this one) and the FX mode's
+ * clear-all-effects (:6161). The port uses it for the first two; the other two need M4's
+ * patch slots and pot reading.
+ *
+ * Named LONG_PRESS_MS rather than LG because a two-letter name in a header that also defines
+ * PAD_PINS is a name somebody will read as "left gesture" in six months. */
+#define LONG_PRESS_MS 500
 
 #define PAD_PLAY_A  0   // pads 1+2 = PLAY/STOP  (V5 :482)
 #define PAD_PLAY_B  1

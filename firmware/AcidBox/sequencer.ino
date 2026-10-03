@@ -1065,6 +1065,94 @@ uint8_t seq_stepEffect(uint8_t step) {
   return seq.steps[step].effect;
 }
 
+// =====================================================================
+// STEP EDITING -- M3 Phase 3
+//
+// V5 writes these three flags directly from doPadRelease() and doPadLong(); here they go
+// through setters, so seq.steps[] keeps exactly one writer. See the note in sequencer.h.
+//
+// The one thing worth reading twice: none of these touch the sub-step schedule. Turning a
+// step OFF, or putting a Retrig on a step that is mid-bar, changes what the NEXT pass of
+// that step will do, and seq_setStepEffect() re-arms for exactly that reason
+// (see its note). Consistency argues for re-arming here too, and consistency is wrong
+// here: seq_subArm() is called at the END of the step handler precisely so that whatever
+// the step did has already happened, and re-arming from a pad press -- which lands between
+// steps, at an arbitrary point in the bar -- would schedule a Retrig's extra hits relative
+// to the wrong step boundary. A step turned off mid-bar stays off until the bar comes round,
+// which is what every hardware sequencer does and is also the only thing that can be
+// predicted from the log.
+// =====================================================================
+
+void seq_setStepActive(uint8_t step, bool on) {
+  if (step >= SEQ_NUM_STEPS) { return; }
+  seq.steps[step].active = on;
+}
+
+// The toggle is defined in terms of the setter rather than writing the field itself, so
+// that seq_setStepActive has exactly one caller instead of none. It started life as a public
+// setter that nothing called -- which is not a compile error and not a warning, just an
+// interface promising something no pad ever asked for. A dead setter next to a live toggle
+// doing the same job is the kind of pair where the next person edits the wrong one.
+void seq_toggleStep(uint8_t step) {
+  seq_setStepActive(step, !seq_stepActive(step));
+}
+
+bool seq_stepActive(uint8_t step) {
+  if (step >= SEQ_NUM_STEPS) { return false; }
+  return seq.steps[step].active;
+}
+
+void seq_setStepAccent(uint8_t step, bool on) {
+  if (step >= SEQ_NUM_STEPS) { return; }
+  seq.steps[step].accent = on;
+}
+
+bool seq_stepAccent(uint8_t step) {
+  if (step >= SEQ_NUM_STEPS) { return false; }
+  return seq.steps[step].accent;
+}
+
+void seq_setStepGlide(uint8_t step, bool on) {
+  if (step >= SEQ_NUM_STEPS) { return; }
+  seq.steps[step].glide = on;
+}
+
+bool seq_stepGlide(uint8_t step) {
+  if (step >= SEQ_NUM_STEPS) { return false; }
+  return seq.steps[step].glide;
+}
+
+uint16_t seq_tempo() { return seq.tempo; }
+uint8_t  seq_len()   { return seq.len; }
+uint8_t  seq_order() { return seq.rrMode; }
+
+bool seq_running() { return seq.running; }
+
+/* Back to how the machine came up. V5 :5872-5904.
+ *
+ * Order matters in one place and only one: seq_loadPreset(0) sets the length to 16 and the
+ * order to forward, so calling seq_setOrder() after it is redundant, and calling
+ * seq_setTempo() before it would be overwritten by nothing -- but the reverse order IS a
+ * bug waiting to happen, since loadPreset is the one that touches len and rrMode. So the
+ * preset goes first and the things it does not own follow. */
+void seq_factoryReset() {
+  seq_loadPreset(0);
+  seq_setTempo(120);
+  seq_setOrder(SEQ_ORDER_FORWARD);
+  seq_setPortaSpeed(4);          // V5 :5900, gPortaSpeed = 4
+  seq_setCh2Mode(SEQ_CH2_MODE_CHORD);
+
+  // V5's reset also clears its filter globals under noInterrupts() (:5897-5899). There is
+  // nothing here to clear: the port keeps no global filter state, each voice owns its own,
+  // and eng_allNotesOff() is the sequencer's only sanctioned way to silence anything (see
+  // seq_stop()). Zeroing a voice's envelope from a pad handler is exactly the coupling M2
+  // was built to take out, and M3 is not the place to put it back.
+
+  DEBF("[M3] factory reset: preset 0, %u BPM, order %u, len %u, porta %u ms, ch2 %s\r\n",
+       (unsigned)seq.tempo, (unsigned)seq.rrMode, (unsigned)seq.len,
+       (unsigned)seq.portaSpeed, seq_ch2ModeName(seqCh2Mode));
+}
+
 void seq_init() {
   // Seeded from micros() rather than from a fixed constant, because SEQ_ORDER_RANDOM with a
   // fixed seed replays the same "random" pattern on every boot, and a pattern that repeats
