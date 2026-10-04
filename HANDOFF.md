@@ -353,7 +353,9 @@ GitHub 新的 Actions 列表页不给 href，run 页面 URL 拼不出来。路�
 | 本机不能编译 | 见 §2.4。不是问题，是既定事实 |
 | `BENCH_AUDIO_HEADROOM` 未做 | core-0 实际余量还是"我记得好像够"。**建议在 M1 之前量** |
 | remote 用 HTTPS 还是 SSH | 无所谓，见 §2.1 的说明 |
-| `HARDWARE_SETUP.md` 两处过期 | `:149` 说 `DEBUG_PORT` 走原生 USB（错，是 UART0）；`:171` 还写着 USB MIDI 不可用。两次问过没回，先留着 |
+| `HARDWARE_SETUP.md` `:171` | 还写着 USB MIDI 不可用。过时 |
+| **`HANDOFF.md` `:356` 自己写反了** | 它把 `HARDWARE_SETUP.md:149` 标成过期、断言「是 UART0」。**方向反了**：`config.h:548-551` 实际编译出 `DEBUG_PORT = HWCDCSerial`，FQBN 两个开关都开，走 USB-OTG —— 和 `HARDWARE_SETUP.md` 一致。而且本文件 `:361` 自己也写着「串口日志走 USB-OTG，不走 UART0」。**有三次空日志构建站在 `HARDWARE_SETUP.md` 那一侧**，它才是对的。顺带：`config.h:105-118` 那段声称 UART0 通到连接器的话是**被推翻的旧版本**，该删 —— 它正是会诱导下一个人把 `DEBUG_PORT` 改回去的文字 |
+| **引脚表** | `PIN_PLAN.md`（`714f029`）。**16 个 pad 直连在 S3 上装不下**：27 需求 / 27 可用 / 余量 0。改成 4×4 矩阵后是 21 已分配 + 4 余量。算术由 `tools/test-pinplan.py` 校验（74 项）。**尚未实施**，`config.h` 里的 `PAD_PINS`/`POT_PINS` 未动 |
 | USB MIDI | 按约定暂时关闭（`MIDI_USB_DEVICE` 关，FQBN 保持 `USBMode=hwcdc,CDCOnBoot=cdc`）。**注意**：重新打开会按作者自己的 guard 再次关掉 `DEBUG_ON`，日志就没了——这是预期行为，不是 bug |
 
 设备管理器里的残留记录（`USB JTAG/serial debug unit`、`COM5` CH340、
@@ -2313,7 +2315,8 @@ sequencer.ino   +88   **只有一个 hunk，位置 :1065**
 |---|---|
 | `ESP32S3_FUSION_IMPLEMENTATION.md` | 设计文档，12 节，D1–D8 决策、风险表、里程碑 |
 | `HANDOFF.md` | 就是这份。**先读 §1 和 §6** |
-| `HARDWARE_SETUP.md` | 接线、BOM、GPIO 表、烧录流程、验收清单 |
+| `HARDWARE_SETUP.md` | 接线、BOM、GPIO 表、烧录流程、验收清单。§4 关于 USB 的结论**经三次失败构建验证过**，别按旧笔记改它 |
+| `PIN_PLAN.md` | **引脚规划**（`714f029`）。现有 `PAD_PINS`/`POT_PINS` 是猜的，而它装不下；本文给出矩阵方案、每条约束的出处、以及 §9 里四个已定位但未修的缺陷。**实施前需先定模块型号**（`V` 后缀会让 GPIO47/48 变 1.8V） |
 | `UPSTREAM.md` | 两个上游的许可处理和锁定版本 |
 | `firmware/AcidBox/` | DSP 层（vendored，MIT），**要改的是这里** |
 | `firmware/AcidBox/engine_iface.h` / `.ino` | M1：MIDI 和音序器共用的一条事件入口，`Ch{Acid,Second,Drums}` |
@@ -2322,6 +2325,7 @@ sequencer.ino   +88   **只有一个 hunk，位置 :1065**
 | `tools/merge-image.py` | 合并成 4 MiB 镜像，偏移量从 core 的 CSV 解析 |
 | `tools/test-merge-image.py` | 9 个用例，纯本地 2 秒 |
 | `tools/test-sequencer.py` | 音序器逻辑的本地仿真 + **对固件源码的直接断言**。头部有说明它测什么、不测什么；§6.8.9 记着它这一轮被变异测试翻了 6 次。**它最后一行无条件打印 `SUITE COMPLETE`** —— 任何读它输出的工具都必须要求这一行，否则**崩掉的运行和全绿的长得一模一样** |
+| `tools/test-pinplan.py` | 校验 `PIN_PLAN.md` 的算术（74 项，约 1 秒）。**从文档本身**读保留脚表、分配表、矩阵布局，所以文档改了脚本没改它会红 —— 它第一版把布局硬编码在脚本里，变异测试立刻抓到（改文档没反应，它在验自己的副本）。末行同样有 `SUITE COMPLETE` |
 | `C:\Users\Rose\AppData\Local\Temp\opencode\mutate3.py` | **变异 harness，在仓库外**。它会改工作树，而它自己的 `finally` 只保证把文件**字节**还原回去 —— 一个半路被杀掉的运行会留下一个脏的工作树，届时 `git checkout --` 恢复的是**已提交的工作**而不是未提交的工作。**Phase 3 现在已经提交**（`882ce25` 起），所以它仍然留在仓库外：它是个一次性的验证工具，不该占仓库里的位置，但 §6.8.9 的数字都要靠它才能复现。§6.8.9 |
 | `.github/workflows/build.yml` | 唯一的构建入口 |
 | `AcidBox/` | 纯净上游，diff 基准，**不要改** |
