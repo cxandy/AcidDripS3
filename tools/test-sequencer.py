@@ -1188,10 +1188,16 @@ print("      per 30 s window with `held a/s 1/0`. Offline arithmetic cannot reac
 #
 # The one thing this section CANNOT check is stated up front rather than left to be
 # discovered later: PAD_PINS. V5's array is RP2040 GPIOs and cannot be reused on the S3
-# (5/6/7 are I2S, 16/17 are POT_PINS, 0 is a strapping pin, 19/20 are USB). config.h
-# therefore carries a re-picked S3 table, and that table is a claim about board wiring
-# with no schematic behind it. What IS checkable here is that it collides with nothing
-# already claimed -- see the pin-collision block below.
+# (5/6/7 are I2S, 1/2/4 are POT_PINS, 18/21 are MIDI, 38-41 are the TFT, 19/20 are USB).
+# config.h therefore carries a re-picked S3 table, and that table is a claim about board
+# wiring with no schematic behind it. What IS checkable here is that it collides with nothing
+# already claimed -- see the pin-collision block below, which reads those sets out of config.h
+# rather than repeating them, so it cannot go stale when the pin plan moves again.
+#
+# The table itself is no longer a free choice: PIN_PLAN.md fixes the pool, the reserve list,
+# the chord-free pads the three strapping pins must land on, and the PCB rules, and
+# tools/test-pinplan.py checks that document's arithmetic. This file checks the other half --
+# that config.h agrees with it and collides with nothing else the firmware owns.
 print()
 print("=" * 78)
 print("M3 Phase 1: pads + FX assign -- V5 logic parsed and compared, wiring read from source")
@@ -1506,13 +1512,64 @@ else:
     print("  [FAIL] PAD_PINS has %d entries / %d distinct" %
           (len(port_pins), len(set(port_pins))))
 
-hits = sorted(set(port_pins) & {5, 6, 7, 15, 16, 17, 0, 19, 20, 4})
+# What the firmware already claims, DERIVED FROM config.h rather than written out here.
+# An earlier revision hard-coded {5,6,7,15,16,17,0,19,20,4} and asserted pads avoid it. That
+# went stale the moment PIN_PLAN.md moved the pots to ADC1 and MIDI to UART1: the hard-coded
+# set kept describing the old plan while config.h described the new one, and the check would
+# have kept passing against numbers nobody had looked at. Two sources of truth for one table
+# is exactly the drift this suite exists to catch.
+def _strip_c(text):
+    """Drop /* */ and // comments before reading numbers out of config.h.
+
+    Both kinds matter. The // pass because every #define here carries a trailing note, and
+    the /* */ pass because the prose ABOVE a define quotes the old value -- the MIDI block
+    comment literally contains the text "MIDITX_PIN 15", so a search that reads comments picks
+    up the value that was replaced instead of the live one. That failure is silent and looks
+    exactly like a real pin collision.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+_cfg_nc = _strip_c(cfg_src)
+
+
+def _cfg_ints(pattern, text=None):
+    m = re.search(pattern, _cfg_nc if text is None else text)
+    return [int(x) for x in re.findall(r"\d+", m.group(1))] if m else []
+
+
+def _cfg_groups(pattern):
+    m = re.search(pattern, _cfg_nc)
+    return [int(g) for g in m.groups()] if m else []
+
+
+i2s_pins = _cfg_groups(
+    r"I2S_BCLK_PIN\s+(\d+)[\s\S]*?I2S_DOUT_PIN\s+(\d+)[\s\S]*?I2S_WCLK_PIN\s+(\d+)")
+pot_now = _cfg_ints(r"POT_PINS\s*\[\s*POT_NUM\s*\]\s*=\s*\{([^}]*)\}")
+midi_now = _cfg_ints(r"MIDITX_PIN\s+(\d+)") + _cfg_ints(r"MIDIRX_PIN\s+(\d+)")
+# The TFT is Phase 4 and nothing is wired to it yet, so it cannot be read out of config.h.
+# One line with its source named, rather than silence: pads landing on 38-41 would be a real
+# collision the moment the display port exists. PIN_PLAN.md section 6 is the authority.
+tft_now = [38, 39, 40, 41]
+# 19/20 are the native USB pair. Structural, not configurable -- the USB connector is wired
+# to them inside the module, so no #define anywhere can move them.
+usb_now = [19, 20]
+
+claimed = set(i2s_pins) | set(pot_now) | set(midi_now) | set(tft_now) | set(usb_now)
+hits = sorted(set(port_pins) & claimed)
 if hits:
-    m3_fail.append("PAD_PINS collides with I2S / POT / strapping / USB / MIDI pins: %s" % hits)
+    m3_fail.append("PAD_PINS collides with I2S / POT / TFT / USB / MIDI pins: %s" % hits)
     print("  [FAIL] collides with pins the firmware already owns: %s" % hits)
 else:
-    print("  [PASS] no overlap with I2S (5,6,7), POT (15,16,17), strapping (0),")
-    print("         USB (19,20) or MIDI (4,15) -- HARDWARE_SETUP.md section 2")
+    print("  [PASS] no overlap with I2S %s, POT %s, TFT %s, USB %s or MIDI %s"
+          % (i2s_pins, pot_now, tft_now, usb_now, sorted(set(midi_now))))
+    print("         -- all read out of config.h except the TFT, which does not exist yet")
+_found_ok = len(i2s_pins) == 3 and len(pot_now) == 3 and len(midi_now) == 2
+print("  [%s] the claimed-pin sets were found in config.h          i2s=%s pot=%s midi=%s"
+      % ("PASS" if _found_ok else "FAIL", i2s_pins, pot_now, sorted(midi_now)))
+if not _found_ok:
+    m3_fail.append("could not read the claimed-pin sets out of config.h")
 
 # ESP32-S3: GPIO 26..37 are occupied by OPI PSRAM inside the WROOM module.
 psram_hits = sorted(set(port_pins) & set(range(26, 38)))
@@ -1522,14 +1579,36 @@ if psram_hits:
 else:
     print("  [PASS] avoids 26..37, which OPI PSRAM occupies inside the module")
 
-# GPIO 45/46 are the VDD_SPI strapping pins on the S3 -- an input with a pull-up on 46
-# is a boot hazard even if it happens to read correctly after boot.
-strap_hits = sorted(set(port_pins) & {45, 46, 0})
-if strap_hits:
-    m3_fail.append("PAD_PINS uses strapping pins: %s" % strap_hits)
-    print("  [FAIL] uses strapping pins: %s" % strap_hits)
+# The strapping pins are NO LONGER forbidden. An earlier revision failed the suite on
+# {0,45,46}, which was caution rather than datasheet: ESP32-S3 Table 3-1 gives GPIO0 a weak
+# pull-up, GPIO45 a weak pull-down and GPIO3 nothing at all, and Table 3-4 shows GPIO45 low is
+# the default 3.3V VDD_SPI. All three are therefore usable as switch-to-ground pad inputs
+# (PIN_PLAN.md 2.5). What IS still forbidden is GPIO46, which the module does not break out --
+# and wiring to it would mean the pin is not there, not that it is dangerous.
+#
+# The check is therefore positive: any strapping pin a pad DOES use has to be one of the three
+# the plan costed out, and every pad has to be switch-to-ground with INPUT_PULLUP -- which is
+# the premise that makes them safe. A pad driving one of these as an output would move the
+# strapping level for real, and that is the failure this is here to catch.
+strap_used = sorted(set(port_pins) & {0, 3, 45})
+strap_forbidden = sorted(set(port_pins) & {46})
+if strap_forbidden:
+    m3_fail.append("PAD_PINS uses GPIO46, which the module does not expose: %s" % strap_forbidden)
+    print("  [FAIL] uses GPIO46 -- not broken out on the WROOM-1: %s" % strap_forbidden)
 else:
-    print("  [PASS] avoids the strapping pins (0, 45, 46)")
+    print("  [PASS] avoids GPIO46, which the WROOM-1 does not break out at all")
+_strap_ok = strap_used == [0, 3, 45]
+print("  [%s] the strapping pins pads use are the three PIN_PLAN.md 2.5 costed out: %s"
+      % ("PASS" if _strap_ok else "FAIL", strap_used))
+if not _strap_ok:
+    m3_fail.append("strapping pins used by pads are %s, expected [0, 3, 45]" % strap_used)
+if strap_used:
+    pullup_ok = re.search(r"pinMode\s*\(\s*PAD_PINS\[i\]\s*,\s*INPUT_PULLUP\s*\)", box_src)
+    print("  [%s] every pad is INPUT_PULLUP (switch-to-ground), which is what makes the"
+          % ("PASS" if pullup_ok else "FAIL"))
+    print("         strapping pins at %s safe at reset" % strap_used)
+    if not pullup_ok:
+        m3_fail.append("a pad uses a strapping pin but the pads are not all INPUT_PULLUP")
 
 print()
 print("  " + "-" * 74)
@@ -1539,9 +1618,13 @@ for f in m3_fail:
 
 print()
 print("  Still NOT settled by anything above, stated so it is not over-read:")
-print("    - that PAD_PINS is the board's actual wiring. No schematic was consulted; the")
-print("      checks above only prove the table collides with nothing the firmware already")
-print("      claims. Every one of the 16 is a guess until someone reads the board.")
+print("    - that PAD_PINS is the board's actual wiring. No schematic was consulted. PIN_PLAN.md")
+print("      fixes WHICH pins are legal (pool, reserves, chord-free pads for the strapping")
+print("      pins, PCB rules) and test-pinplan.py checks that document; the checks above prove")
+print("      config.h agrees with it and collides with nothing else the firmware owns. Neither")
+print("      proves the custom PCB routes them. Pads 14/15/16 are GPIO42/43/44, which the")
+print("      CURRENT dev board does not break out, so those three read high and never fire")
+print("      here -- silently, with no diagnostic.")
 print("    - that the debounce behaves on real contacts. 20 ms and the edge-restart scheme")
 print("      are modelled from V5's shape, not measured on a bouncing switch.")
 print("    - that the gesture feels like V5's. Sequencing FX onto a step is only reachable")

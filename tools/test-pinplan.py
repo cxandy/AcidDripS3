@@ -456,8 +456,16 @@ check(re.search(r"2\.475V", doc) is not None,
       "the doc gives the input-high threshold the divider has to clear")
 
 
-# ---------------------------------------------------------------- current-tree defects
-print("\n=== defects claimed in section 9 ===")
+# ---------------------------------------------------------------- config.h implements the plan
+# This section started as "assert the documented defects are still present" -- checks written
+# to fail if a defect were ever fixed by accident. Two of them have now been fixed on
+# purpose, so asserting their presence would turn this suite red on correct code.
+#
+# The replacement asks a stronger question. The old checks asked "does PAD_PINS avoid the
+# pins the firmware already owns?", which a wrong-but-safe table passes. This asks "is
+# PAD_PINS exactly PIN_PLAN.md section 6's table?", so the document and the firmware cannot
+# disagree while both look authoritative.
+print("\n=== config.h implements PIN_PLAN.md section 6 ===")
 cfg = read(CFG_PATH)
 
 
@@ -475,41 +483,66 @@ def strip_comments(text):
     return "\n".join(out)
 
 
+def strip_all_comments(text):
+    """Drop /* */ as well as //.
+
+    Needed because config.h's prose sits ABOVE each define and quotes the value it replaced:
+    the MIDI block comment literally contains the text "MIDITX_PIN 15". A search that reads
+    comments finds the pin that was just removed and reports a collision that does not exist
+    -- which is the same class of bug as the comment-digits one above, one layer up.
+    """
+    return strip_comments(re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+
+
 cfg_code = strip_comments(cfg)
+cfg_num = strip_all_comments(cfg)
 
 pad_m = re.search(r"PAD_PINS\[NUM_PADS\]\s*=\s*\{(.*?)\};", cfg_code, re.S)
 check(pad_m is not None, "PAD_PINS[] found")
 if pad_m:
     pads = [int(x) for x in re.findall(r"\d+", pad_m.group(1))]
     check(len(pads) == 16, "PAD_PINS has 16 entries (comments stripped)", "got %d" % len(pads))
-    check(pads[2] == 3, "pad 3 (index 2) really is GPIO3 -- the strapping-pin defect")
     check(len(pads) == len(set(pads)), "PAD_PINS has no internal duplicate")
-    # The next three assert DEFECTS, not health. They are written to fail if the defect is
-    # ever fixed by accident -- which is what makes them worth keeping afterwards.
-    check(set(pads) & {3}, "GPIO3 really is in PAD_PINS (section 9.1's claim)")
-    check(not (set(pads) & set([35, 36, 37, 19, 20, 0, 45])),
-          "PAD_PINS avoids the PSRAM / USB / BOOT pins it must",
-          "collides: %s" % sorted(set(pads) & {35, 36, 37, 19, 20, 0, 45}))
-    check(not (set(pads) & set([5, 6, 7])), "current PAD_PINS avoids the I2S pins")
 
-    # Section 9.1's defect must actually be fixed BY the planned table -- i.e. pad 3 must not
-    # still land on GPIO3 there. Under the new table pad 3 moves to GPIO0 and GPIO3 becomes
-    # pad 4, which is a chord-free pad.
-    check(pad_gpio.get(3) not in (None, 3),
-          "the planned table moves pad 3 off GPIO3", "planned: %s" % pad_gpio.get(3))
+    plan_pads = [pad_gpio[i] for i in range(1, 17)]
+    check(pads == plan_pads,
+          "config.h's PAD_PINS IS PIN_PLAN.md section 6's table, in pad order",
+          "config.h %s / plan %s" % (pads, plan_pads))
+    # Section 9.1's defect: pad 3 used to sit on GPIO3, a strapping pin, while the comment
+    # above the array listed only GPIO0. Asserting the absence is what stops the old table
+    # creeping back in a future edit.
+    check(pads[2] != 3, "pad 3 is no longer on GPIO3 (section 9.1 fixed)",
+          "index 2 = %d" % pads[2])
+    check(3 in pads, "GPIO3 is still used -- as pad 4, one of the chord-free pads", str(pads))
+    check(not (set(pads) & {19, 20, 35, 36, 37}),
+          "PAD_PINS avoids the USB pair and the module's PSRAM pins",
+          "collides: %s" % sorted(set(pads) & {19, 20, 35, 36, 37}))
+    check(not (set(pads) & set(i2s)), "PAD_PINS avoids the I2S pins")
 
 pot_m = re.search(r"POT_PINS\[POT_NUM\]\s*=\s*\{([^}]*)\};", cfg_code)
 check(pot_m is not None, "POT_PINS[] found")
 pots_now = [int(x) for x in re.findall(r"\d+", pot_m.group(1))] if pot_m else []
-check(pots_now == [15, 16, 17], "current POT_PINS is {15,16,17}", str(pots_now))
-check(all(p > 10 for p in pots_now), "every current pot is on ADC2, not ADC1 -- must move")
+plan_pot_order = [ASSIGNED[k][0] for k in ("POT CUT", "POT RES", "POT DECAY") if k in ASSIGNED]
+check(pots_now == plan_pot_order,
+      "config.h's POT_PINS is the plan's CUT/RES/DECAY, in that order",
+      "config.h %s / plan %s" % (pots_now, plan_pot_order))
+check(all(1 <= p <= 10 for p in pots_now),
+      "every pot is now inside ADC1 (GPIO1-10) -- all three used to be on ADC2", str(pots_now))
 
-mt = re.search(r"#define\s+MIDITX_PIN\s+(\d+)", cfg_code)
+mt = re.search(r"#define\s+MIDITX_PIN\s+(\d+)", cfg_num)
+mr = re.search(r"#define\s+MIDIRX_PIN\s+(\d+)", cfg_num)
 check(mt is not None, "MIDITX_PIN found")
-if mt and pot_m:
-    tx = int(mt.group(1))
-    check(tx in pots_now, "MIDITX_PIN really does collide with POT_PINS (section 9.2)",
+check(mr is not None, "MIDIRX_PIN found")
+if mt and mr:
+    tx, rx = int(mt.group(1)), int(mr.group(1))
+    plan_midi = sorted(p for k, v in ASSIGNED.items() if k.startswith("MIDI") for p in v)
+    check(sorted([tx, rx]) == plan_midi,
+          "config.h's MIDI TX/RX are the plan's pair",
+          "config.h %s / plan %s" % ([tx, rx], plan_midi))
+    check(tx not in pots_now,
+          "MIDITX_PIN no longer collides with POT_PINS (section 9.2 fixed)",
           "MIDITX=%d, pots=%s" % (tx, pots_now))
+    check(tx not in pads and rx not in pads, "no MIDI pin is also a pad")
 
 # Four DEBUG_PORT definitions appear in the text: Serial0, plus one inside each arm of the
 # ESP_ARDUINO_VERSION_MAJOR #if/#else, plus the HWCDCSerial override. Only the LAST one is
@@ -523,7 +556,7 @@ if dbg:
 check(re.search(r"#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT\s*\n\s*#undef DEBUG_PORT",
                 cfg_code) is not None,
       "that last DEBUG_PORT is the one guarded by USBMode + CDCOnBoot, both set in the FQBN")
-check(len(dbg) >= 2, "config.h really does contain the contradiction section 9.4 describes",
+check(len(dbg) >= 2, "config.h still contains the contradiction section 9.4 describes",
       "%d textual definitions" % len(dbg))
 
 # pads and pots are separate physical controls, so they must not share a pin. Section 9.2 is

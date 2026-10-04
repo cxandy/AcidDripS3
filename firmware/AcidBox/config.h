@@ -120,8 +120,22 @@
 // #define MIDI_VIA_SERIAL       // use this option to enable Hairless MIDI on Serial port @115200 baud (USB connector), THIS WILL BLOCK SERIAL DEBUGGING as well
 //#define MIDI_VIA_SERIAL2        // use this option if you want to operate by standard MIDI @31250baud, UART2 (Serial2),
 
-#define MIDIRX_PIN      4       // this pin is used for input when MIDI_VIA_SERIAL2 defined (note that default pin 17 won't work with PSRAM)
-#define MIDITX_PIN      15      // this pin will be used for output (not implemented yet) when MIDI_VIA_SERIAL2 defined
+/* MIDI DIN on UART1 -- GPIO18 TX, GPIO21 RX. PIN_PLAN.md section 6.
+ *
+ * Deliberately NOT on UART0's 43/44. The ROM console prints to U0TXD = GPIO43 before any
+ * firmware runs, so a MIDI output circuit on 43 would put the boot log out as MIDI data on
+ * every power-up. That also means the two pins are free for pads 15 and 16.
+ *
+ * MIDI RX additionally needs a 6.8k/10k divider on the board: a MIDI input is a 5V current
+ * loop (the sender's optocoupler and 220R to 5V) and ESP32 GPIOs are not 5V tolerant.
+ * Divided, 5V becomes 2.98V -- above the 2.475V input-high threshold, below 3.3V. Leaving
+ * that divider off burns the pin.
+ *
+ * Both features are off below (MIDI_VIA_SERIAL2 and ENABLE_MIDI_OUT), so this is inert
+ * until one is enabled -- which is also why the old MIDITX_PIN 15 colliding with POT_PINS[0]
+ * never actually bit: nothing had opened MIDI to hit it. */
+#define MIDIRX_PIN      21      // UART1 RX, input only when MIDI_VIA_SERIAL2 is defined
+#define MIDITX_PIN      18      // UART1 TX, output when MIDI_VIA_SERIAL2 and ENABLE_MIDI_OUT
 //#define ENABLE_MIDI_OUT 
 
 #define POT_NUM 3
@@ -129,7 +143,13 @@
 #define I2S_BCLK_PIN    5       // I2S BIT CLOCK pin (BCL BCK CLK)
 #define I2S_DOUT_PIN    6       // to I2S DATA IN pin (DIN D DAT)
 #define I2S_WCLK_PIN    7       // I2S WORD CLOCK pin (WCK WCL LCK)
-const uint8_t POT_PINS[POT_NUM] = {15, 16, 17};
+/* CUT / RES / DECAY. On the ESP32-S3 ADC1 covers GPIO1-10, so that is the whole legal
+ * range for a potentiometer here; the rest of it is left free for a fourth knob.
+ *
+ * The previous {15,16,17} sat entirely on ADC2 -- which is exactly where pads 7-13 now are
+ * (PIN_PLAN.md section 6). Keeping it would have put the pots and half the control surface
+ * on the same GPIOs. */
+const uint8_t POT_PINS[POT_NUM] = {1, 2, 4};
 #elif defined(CONFIG_IDF_TARGET_ESP32)
 #define I2S_BCLK_PIN    5       // I2S BIT CLOCK pin (BCL BCK CLK)
 #define I2S_WCLK_PIN    19      // I2S WORD CLOCK pin (WCK WCL LCK)
@@ -137,41 +157,66 @@ const uint8_t POT_PINS[POT_NUM] = {15, 16, 17};
 const uint8_t POT_PINS[POT_NUM] = {34, 35, 36};
 #endif
 
-/* M3 PADS -- the 16-pad control surface.
+/* M3 PADS -- the 16-pad control surface. ONE PIN PER PAD.
  *
- * The pin table below is the ONE part of M3 that is NOT a port. V5 runs on an RP2040
- * whose PAD_PINS are GPIOs 0-22 (Acid_Drip_Drum_Acid_Drift_V5.ino:477-480); those same
- * numbers on this S3 are already spoken for:
+ * An earlier plan used a 4x4 matrix, on the belief that 16 direct pads did not fit (27
+ * needed, 27 available, zero spare). That arithmetic was the only reason. GPIO0, GPIO3 and
+ * GPIO45 had been held back out of caution rather than from the datasheet, and ESP32-S3
+ * Table 3-1 / 3-4 show all three are usable as switch-to-ground inputs. That is three pins
+ * of margin, so: 28 assigned against a pool of 30, two spare, and pads_m3.ino needed no
+ * change at all.
  *
- *     5, 6, 7     I2S_BCLK / I2S_DOUT / I2S_WCLK  -- the audio path
- *     15, 16, 17  POT_PINS
- *     0           strapping pin (BOOT), the board will not always boot if this is pulled
- *     19, 20      native USB pair
- *     4           MIDIRX_PIN
- *     26-37       OPI PSRAM, soldered inside the WROOM module
- *     43, 44      UART0 TX/RX, which is where the debug log comes out
+ * PIN_PLAN.md IS THE AUTHORITY for this table -- the pool, the reserve list, the chord table
+ * and the PCB rules are all there with their sources, and tools/test-pinplan.py checks the
+ * arithmetic against the document. This comment is the short version; do not derive numbers
+ * from it.
  *
- * Copying V5's array verbatim would therefore put pads on pins the audio path owns, and
- * the symptom would be noise on the DAC rather than a compile error -- so the array below
- * is picked from what is left.
+ * WHY V5's OWN ARRAY COULD NOT BE COPIED. V5 runs on an RP2040 whose PAD_PINS are GPIOs
+ * 0-22 (Acid_Drip_Drum_Acid_Drift_V5.ino:477-480); on this S3 those same numbers are:
  *
- * WHAT IS AND IS NOT KNOWN ABOUT IT. The table avoids everything the firmware already
- * claims, and tools/test-sequencer.py asserts that rather than trusting this comment. But
- * avoiding a collision is not the same as being correct: no schematic for the AcidBox-S3
- * pad matrix has been read, so all sixteen of these are a guess at a board layout that has
- * not been confirmed. They are the free, safe GPIOs in ascending order, which is a
- * defensible placeholder and an obvious one to replace the moment the real wiring is
- * known. Nothing about the pad LOGIC depends on the choice -- only the physical
- * connector does.
+ *     1, 2, 4      POT_PINS -- ADC1
+ *     5, 6, 7      I2S_BCLK / I2S_DOUT / I2S_WCLK -- the audio path
+ *     18, 21       MIDITX / MIDIRX -- UART1
+ *     38, 39, 40, 41  TFT SCK / MOSI / CS / DC -- Phase 4, nothing wired to them yet
+ *     19, 20       native USB pair -- the only USB connector this board has
+ *     26-37        OPI PSRAM, soldered inside the WROOM module
+ *     47, 48       1.8V domain on a `V`-suffix module, so deliberately left spare
  *
- * Two pads that are already claimed by the port and must not be moved without also
- * updating the tests: PAD_FUNC_A/B are indices 6 and 7, i.e. physical pads 7 and 8, which
- * is V5's FUNC chord (:482-485), and the test compares those two #defines against V5's.
+ * A collision here would surface as noise on the DAC, not as a compile error.
+ *
+ * THE THREE STRAPPING PINS ARE USED: GPIO0 on pad 3, GPIO3 on pad 4, GPIO45 on pad 5. Each
+ * one's datasheet default is preserved by switch-to-ground (PIN_PLAN.md 2.5 carries the
+ * tables). Three PCB rules travel with them and are NOT visible from this file:
+ *
+ *     - GPIO45's net must carry NO pull-up. Pulled high, the chip looks for 3.3V flash on a
+ *       1.8V rail and does not boot at all.
+ *     - GPIO3 and GPIO0 want a 10k pull-up to 3V3. GPIO3's default is "Floating", i.e. no
+ *       default bit value at all.
+ *     - Every pad is switch-to-ground with INPUT_PULLUP. That arrangement is what makes the
+ *       strapping pins safe, so it is a premise of the plan, not a preference.
+ *
+ * Pads 3, 4 and 5 were picked for those three pins because they are the only pads in no
+ * chord at all -- 3, 4, 5 and 6 (PIN_PLAN.md 5.3) -- so holding a gesture can never pull a
+ * strapping pin low at reset. Holding pad 3 at power-up does enter the ROM download mode; it
+ * is recoverable by releasing and pressing RST, and it is the one thing here that has to be
+ * tried on hardware rather than reasoned about.
+ *
+ * WHAT IS AND IS NOT KNOWN ABOUT THE WIRING. Pads 14, 15 and 16 are GPIO42/43/44, which the
+ * CURRENT dev board does not break out -- HARDWARE_SETUP.md section 4 proved UART0 is not
+ * routed to the only connector, by three builds that printed nothing. An unconnected
+ * INPUT_PULLUP pin reads high, so those three pads are silently dead here: no crash, no
+ * diagnostic, they simply never fire. They come alive on the custom PCB this plan is written
+ * for. The previous table put pads 13-16 on 38-41, which are the TFT pins, so those three
+ * were not functional either -- this is a lateral move, not a regression.
+ *
+ * Two pads that are already claimed by the port and must not be moved without also updating
+ * the tests: PAD_FUNC_A/B are indices 6 and 7, i.e. physical pads 7 and 8, which is V5's
+ * FUNC chord (:484-485), and the test compares those two #defines against V5's.
  */
 #define NUM_PADS 16
 const uint8_t PAD_PINS[NUM_PADS] = {
-  1, 2, 3, 8, 9, 10, 11, 12,     // pads 1-8   top row: FX picker, and steps 1-8
-  13, 14, 18, 21, 38, 39, 40, 41 // pads 9-16  bottom row: steps 9-16
+  8, 9, 0, 3, 45, 10, 11, 12,    // pads  1-8
+  13, 14, 15, 16, 17, 42, 43, 44 // pads  9-16
 };
 
 /* Debounce window, in ms. The scheme is V5's shape: any raw edge restarts the timer, and
